@@ -4,6 +4,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 const fmt$ = cents => '$' + (cents / 100).toFixed(0);
+const fmtEta = v => { const t = String(v ?? '').trim(); return /^\d+$/.test(t) ? t + ' min' : t; };
 function toast(msg){
   const t = $('toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 3000);
@@ -401,33 +402,60 @@ function vDLocation(){
   return `
   <button class="back" onclick="nav('d-details')">${ic('chevL',15)} Back</button>
   <h2 class="scr">Where are you?</h2>
-  <p class="scrsub">Step 4 of 4 is next — first, lock your location</p>
-  <div class="card ${d.lat ? '' : 'alert'}">
-    <div class="row">
-      <span class="mini k">${ic('pin',15)} ${d.lat ? `GPS locked: ${d.lat.toFixed(4)}, ${d.lng.toFixed(4)}` : 'GPS not captured yet'}</span>
-      <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="captureGPS()">${d.lat?'Re-capture':'Use my GPS'}</button>
+  <p class="scrsub">Step 3 of 4 — this is how they find you</p>
+  ${d.lat ? `
+  <div class="card">
+    <div class="row"><span class="sec">${ic('check',14)} Location locked</span>
+      <a class="faint" onclick="captureGPS()">re-capture</a></div>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Companies will see</span> &nbsp;<b class="k">${esc(d.area_label || 'locating…')}</b><br>
+      <span class="muted">Exact GPS</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">(only shown after they buy)</span>
     </div>
-  </div>
-  <label class="f">Area (what nearby companies see before buying)</label>
-  <input type="text" id="rq-area" value="${esc(d.area_label || '')}" placeholder="Near Buttonwillow, CA on I-5">
-  <label class="f">Exact landmark / mile marker (unlocked buyers only)</label>
-  <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="I-5 NB shoulder, mile marker 253, past Buttonwillow exit">
+  </div>` : `
+  <div class="card alert">
+    <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">Tap below to share your location.</b> Your exact spot stays hidden until a company pays for the lead — they only see the general area first.</div>
+    <div style="height:12px"></div>
+    <button class="btn" onclick="captureGPS()">${ic('pin',16)} Use my GPS location</button>
+  </div>`}
+  <label class="f">Landmark or mile marker (optional, helps a lot)</label>
+  <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="I-5 NB shoulder, mile marker 253, past the Buttonwillow exit">
+  <div class="faint" style="margin-top:6px">Only companies that buy your lead see this.</div>
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveLocation()">Continue ${ic('arrowR',15)}</button>`;
+  <button class="btn" onclick="saveLocation()" ${d.lat ? '' : 'disabled'}>Continue ${ic('arrowR',15)}</button>
+  ${d.lat ? '' : '<div class="faint" style="text-align:center; margin-top:9px">Share your location to continue — or <a onclick="manualLocation()">enter it by hand</a></div>'}`;
+}
+async function lookupArea(){
+  const d = S.draft;
+  try {
+    const g = await api('GET', `/geo?lat=${d.lat}&lng=${d.lng}`);
+    d.area_label = g.area_label;
+  } catch(e){ d.area_label = ''; }
+  render();
 }
 function captureGPS(){
-  if (!navigator.geolocation) return toast('No GPS on this device — type your location below');
+  if (!navigator.geolocation) return toast('No GPS on this device — enter it by hand');
   toast('Locating…');
   navigator.geolocation.getCurrentPosition(
-    pos => { S.draft.lat = pos.coords.latitude; S.draft.lng = pos.coords.longitude; render(); toast('GPS locked'); },
-    () => toast('GPS unavailable — type your location below'),
-    { enableHighAccuracy: true, timeout: 8000 });
+    pos => {
+      S.draft.lat = pos.coords.latitude; S.draft.lng = pos.coords.longitude;
+      toast('Location locked'); lookupArea();
+    },
+    () => toast('GPS unavailable — enter it by hand instead'),
+    { enableHighAccuracy: true, timeout: 10000 });
+}
+function manualLocation(){
+  const txt = prompt('Type the nearest town and state (example: Buttonwillow, CA)');
+  if (!txt) return;
+  S.draft.lat = 35.4021; S.draft.lng = -119.4718;   // approximate; landmark carries the detail
+  S.draft.area_label = txt.trim();
+  S.draft.landmark = (S.draft.landmark || '') + (S.draft.landmark ? ' · ' : '') + txt.trim();
+  toast('Saved — add a mile marker below so they can find you');
+  render();
 }
 function saveLocation(){
   const d = S.draft;
-  d.area_label = qv('rq-area') || 'Near my GPS location';
+  if (!d.lat) return toast('Share your location first');
   d.landmark = qv('rq-landmark');
-  if (!d.lat){ d.lat = 35.4021; d.lng = -119.4718; } // fallback if GPS denied (still matched by area providers)
   nav('d-review');
 }
 function vDReview(){
@@ -481,7 +509,7 @@ async function vDActive(){
   return `
   <button class="back" onclick="nav('d-home')">${ic('chevL',15)} Home</button>
   <h2 class="scr">${r.status==='open' ? 'Help is on the way' : 'Request #'+r.id}</h2>
-  <p class="scrsub">Request #${r.id} · ${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} providers alerted</p>
+  <p class="scrsub">Request #${r.id} · ${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} compan${r.notified_count===1?'y':'ies'} alerted</p>
   <div class="card">
     <div class="row"><span class="sec">Response Slots</span><span class="pill red">${filled ? filled + ' of 4 responded' : 'notifying…'}</span></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
@@ -502,7 +530,7 @@ async function vDActive(){
         <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? 'New'} · ${x.jobs_won} jobs${x.premium ? ' · premium responder' : ''}</span>
         ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} LICENSED</span>` : ''}</div>
       </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
-      ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(x.quote.eta) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
+      ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
       <div class="row" style="margin-top:11px; gap:8px">
         <button class="btn ghost" style="padding:11px" onclick="nav('d-chat',{chatKey:{r:${r.id},p:${x.provider_id}}})">${ic('chat',15)} Chat</button>
         ${r.status==='open' ? `<button class="btn" style="padding:11px" onclick="chooseProvider(${r.id},${x.provider_id})">${ic('check',15)} Choose</button>` : ''}
@@ -645,8 +673,8 @@ async function chatView(backView){
     <span class="pill ${d.request.status==='open'?'red':'dark'}">${esc(d.request.status.toUpperCase())}</span></div></div>
   <div class="chatbox" id="chatlog">
     ${d.messages.map(m=>`
-      <div class="msg ${m.quote ? 'quotecard' : (mine(m.sender_id) ? 'me' : 'them')}">
-        ${m.quote ? `${ic('tag',14)} <b class="k">QUOTE — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · ETA '+esc(m.quote.eta) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
+      <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
+        ${m.quote ? `${ic('tag',14)} <b class="k">QUOTE — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
         <span class="t">${timeAgo(m.created_at)}</span>
       </div>`).join('') || '<div class="faint" style="text-align:center; padding:20px">Say hello — the other side is notified instantly</div>'}
   </div>
@@ -1033,18 +1061,69 @@ async function vPSettings(){
 /* ---------------- admin ---------------- */
 async function vAHome(){
   const o = await api('GET', '/admin/overview');
+  const tile = (label, value, sub, view, extra) => `
+    <div class="tile click" onclick="nav('${view}'${extra ? ','+extra : ''})">
+      <div class="row"><div class="l">${label}</div><span style="color:var(--faint)">${ic('arrowR',13)}</span></div>
+      <div class="v">${value}</div>${sub ? `<div class="d">${sub}</div>` : ''}
+    </div>`;
   return `
   <h2 class="scr">RIGRX Admin</h2>
-  <p class="scrsub">The whole marketplace at a glance</p>
+  <p class="scrsub">The whole marketplace at a glance — click any number to see what's behind it</p>
   <div class="tiles">
-    <div class="tile"><div class="l">Requests (24h)</div><div class="v">${o.requests_24h}</div></div>
-    <div class="tile"><div class="l">Revenue (24h)</div><div class="v">${fmt$(o.revenue_24h_cents)}</div></div>
-    <div class="tile"><div class="l">Revenue (total)</div><div class="v">${fmt$(o.revenue_total_cents)}</div></div>
-    <div class="tile"><div class="l">Fill rate</div><div class="v">${o.fill_rate}%</div><div class="d">requests with ≥1 unlock</div></div>
-    <div class="tile"><div class="l">Drivers</div><div class="v">${o.drivers}</div></div>
-    <div class="tile"><div class="l">Providers</div><div class="v">${o.providers}</div><div class="d ${o.pending_providers?'up':''}">${o.pending_providers} awaiting approval</div></div>
+    ${tile('Requests (24h)', o.requests_24h, 'tap for the list', 'a-requests', `{adminReqWindow:'24h'}`)}
+    ${tile('Revenue (24h)', fmt$(o.revenue_24h_cents), 'every lead sold today', 'a-purchases', `{adminSalesWindow:'24h'}`)}
+    ${tile('Revenue (total)', fmt$(o.revenue_total_cents), 'all lead sales', 'a-purchases', `{adminSalesWindow:''}`)}
+    ${tile('Fill rate', o.fill_rate + '%', 'requests nobody bought', 'a-requests', `{adminReqWindow:'unfilled'}`)}
+    ${tile('Drivers', o.drivers, 'who is requesting help', 'a-drivers')}
+    ${tile('Providers', o.providers, `${o.pending_providers} awaiting approval`, 'a-providers')}
   </div>
   ${o.pending_providers ? `<div class="card click alert" onclick="nav('a-providers')"><div class="row"><span class="mini k">${ic('clock',14)} ${o.pending_providers} provider${o.pending_providers===1?'':'s'} waiting for approval</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
+}
+async function vADrivers(){
+  const rows = await api('GET', '/admin/drivers');
+  return `
+  <h2 class="scr">Drivers</h2>
+  <p class="scrsub">Everyone who has requested help — click for their full history</p>
+  ${rows.map(d=>`<div class="card click" onclick="nav('a-driver',{adminDriverId:${d.id}})">
+    <div class="row"><div><b class="mini k">${esc(d.name || '(no name yet)')}</b>
+      <div class="faint">${esc(d.phone)}${d.company ? ' · '+esc(d.company) : ''} · ${d.requests} request${d.requests===1?'':'s'} · ${d.trucks} truck${d.trucks===1?'':'s'} · joined ${timeAgo(d.created_at)}</div></div>
+    <span style="display:inline-flex; gap:8px; align-items:center">
+      <span class="pill ${d.revenue_cents?'solid':'gray'}">${fmt$(d.revenue_cents)} earned</span>
+      <span style="color:var(--red)">${ic('arrowR',16)}</span></span>
+  </div></div>`).join('') || '<div class="card"><span class="muted">No drivers yet</span></div>'}`;
+}
+async function vADriver(){
+  const d = await api('GET', '/admin/drivers/' + S.adminDriverId);
+  const u = d.driver;
+  return `
+  <button class="back" onclick="nav('a-drivers')">${ic('chevL',15)} All drivers</button>
+  <h2 class="scr" style="margin-top:8px">${esc(u.name || '(no name)')}</h2>
+  <p class="scrsub">${esc(u.phone)} · ${esc(u.driver_type || 'driver')} · joined ${timeAgo(u.created_at)}${u.rating ? ' · rated '+u.rating+' by providers' : ''}</p>
+  <div class="cols2"><div>
+  <div class="card">
+    <span class="sec">Contact</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Phone</span> &nbsp;${esc(u.phone)}<br>
+      <span class="muted">Email</span> &nbsp;${esc(u.email || '—')}<br>
+      <span class="muted">Company</span> &nbsp;${esc(u.company || '—')}
+    </div>
+  </div>
+  <div class="card">
+    <span class="sec">Equipment on file</span>
+    ${d.trucks.map(t=>`<div class="checkrow"><span class="cico on">${ic('truck',15)}</span><div class="mini"><b class="k">Unit ${esc(t.data.unit)} — ${esc(t.data.year)} ${esc(t.data.make)} ${esc(t.data.model)}</b><div class="faint">${esc(t.data.engine)} · ${esc(t.data.axles)} · tires ${esc(t.data.steer)} / ${esc(t.data.drive)}</div></div></div>`).join('')}
+    ${d.trailers.map(t=>`<div class="checkrow"><span class="cico on">${ic('trailer',15)}</span><div class="mini"><b class="k">Trailer ${esc(t.data.num)} — ${esc(t.data.type)}</b><div class="faint">${t.data.hazmat ? 'Hazmat Class '+esc(t.data.hzClass)+' · UN '+esc(t.data.un) : 'No hazmat'}</div></div></div>`).join('')}
+    ${!d.trucks.length && !d.trailers.length ? '<div class="faint" style="margin-top:8px">Nothing saved yet</div>' : ''}
+  </div>
+  </div><div>
+  <div class="card">
+    <span class="sec">Requests (${d.requests.length})</span>
+    ${d.requests.map(r=>`<div class="checkrow" style="cursor:pointer" onclick="nav('a-request',{adminRequestId:${r.id}})">
+      <span class="cico ${r.status==='open'?'on':''}">${ic(svcIcon(r.service_key),15)}</span>
+      <div class="mini" style="flex:1"><b class="k">#${r.id} — ${esc(r.service_label)}</b>
+      <div class="faint">${esc(r.area_label)} · ${r.buyers} bought · ${fmt$(r.revenue_cents)} · ${timeAgo(r.created_at)}</div></div>
+      <span class="pill ${r.status==='open'?'red':'gray'}">${esc(r.status)}</span></div>`).join('') || '<div class="faint" style="margin-top:8px">No requests yet</div>'}
+  </div>
+  </div></div>`;
 }
 async function vAProviders(){
   const rows = await api('GET', '/admin/providers');
@@ -1144,7 +1223,7 @@ async function vAProvider(){
 
   <div class="card">
     <span class="sec">Private notes (only you see these)</span>
-    <textarea rows="3" id="adm-notes" placeholder="Called to verify insurance 8/12 — good.">${esc(p.admin_notes)}</textarea>
+    <textarea rows="3" id="adm-notes" placeholder="e.g. spoke with the owner, insurance checks out">${esc(p.admin_notes)}</textarea>
     <div style="height:8px"></div>
     <button class="btn ghost" onclick="saveAdminNotes(${p.user_id})">Save notes</button>
   </div>
@@ -1185,15 +1264,24 @@ async function savePrice(key){
   toast('Price updated');
 }
 async function vAPurchases(){
-  const rows = await api('GET', '/admin/purchases');
+  const w = S.adminSalesWindow || '';
+  const rows = await api('GET', '/admin/purchases' + (w === '24h' ? '?window=24h' : ''));
+  const total = rows.filter(x=>!x.refunded).reduce((a,x)=>a+x.amount_cents,0);
   return `
-  <h2 class="scr">Lead Sales</h2>
-  <p class="scrsub">Every purchase — refund the bad ones to keep providers trusting you</p>
-  ${rows.map(x=>`<div class="card"><div class="row">
-    <div><b class="mini k">${fmt$(x.amount_cents)} — ${esc(x.provider_name)}</b>
-    <div class="faint">Lead #${x.request_id} · ${esc(x.service_label)} · slot ${x.slot}${x.premium?' (premium)':''} · ${timeAgo(x.created_at)}</div></div>
-    ${x.refunded ? '<span class="pill gray">REFUNDED</span>' : `<button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminRefund(${x.id})">Refund</button>`}
-  </div></div>`).join('') || '<div class="card"><span class="muted">No sales yet</span></div>'}`;
+  <h2 class="scr">Lead Sales${w === '24h' ? ' — last 24 hours' : ''}</h2>
+  <p class="scrsub">${fmt$(total)} from ${rows.length} sale${rows.length===1?'':'s'} · click a sale to open the request behind it</p>
+  <div class="chips" style="margin-bottom:14px">
+    ${[['','All time'],['24h','Last 24h']].map(([v,l])=>
+      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-purchases',{adminSalesWindow:'${v}'})">${l}</span>`).join('')}
+  </div>
+  ${rows.map(x=>`<div class="card">
+    <div class="row">
+      <div style="cursor:pointer" onclick="nav('a-request',{adminRequestId:${x.request_id}})">
+        <b class="mini k">${fmt$(x.amount_cents)} — ${esc(x.provider_name)}${x.won?' <span class="pill solid" style="font-size:9px">WON THE JOB</span>':''}</b>
+        <div class="faint">Request #${x.request_id} · ${esc(x.service_label)} · ${esc(x.area_label)} · from ${esc(x.driver_name || 'driver')} · slot ${x.slot}${x.premium?' (premium)':''} · ${timeAgo(x.created_at)}</div>
+      </div>
+      ${x.refunded ? '<span class="pill gray">REFUNDED</span>' : `<button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="event.stopPropagation();adminRefund(${x.id})">Refund</button>`}
+    </div></div>`).join('') || '<div class="card" style="text-align:center"><span class="muted">No sales yet</span></div>'}`;
 }
 async function adminRefund(id){
   await api('POST', `/admin/purchases/${id}/refund`);
@@ -1217,15 +1305,101 @@ async function adminCustom(id, action){
   render();
 }
 async function vARequests(){
-  const rows = await api('GET', '/admin/requests');
+  const w = S.adminReqWindow || '';
+  const qs = w === '24h' ? '?window=24h' : w === 'unfilled' ? '?unfilled=1' : w === 'filled' ? '?filled=1' : '';
+  const rows = await api('GET', '/admin/requests' + qs);
+  const titles = { '24h': 'Requests — last 24 hours', 'unfilled': 'Requests nobody bought', 'filled': 'Requests that sold', '': 'Requests' };
   return `
-  <h2 class="scr">Requests</h2>
-  <p class="scrsub">Live view of everything drivers are asking for</p>
-  ${rows.map(r=>`<div class="card"><div class="row">
-    <div><b class="mini k">#${r.id} — ${esc(r.service_label)}</b>
+  <h2 class="scr">${titles[w]}</h2>
+  <p class="scrsub">Click any request to see everything in it, including all messages</p>
+  <div class="chips" style="margin-bottom:14px">
+    ${[['','All'],['24h','Last 24h'],['filled','Sold'],['unfilled','Unsold']].map(([v,l])=>
+      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-requests',{adminReqWindow:'${v}'})">${l}</span>`).join('')}
+  </div>
+  ${rows.map(r=>`<div class="card click" onclick="nav('a-request',{adminRequestId:${r.id}})"><div class="row">
+    <div><b class="mini k">#${r.id} — ${esc(r.service_label)}${r.licensed_only ? ' <span class="pill dark" style="font-size:9px">LICENSED ONLY</span>' : ''}</b>
     <div class="faint">${esc(r.driver_name || 'driver')} · ${esc(r.area_label)} · ${r.notified_count} notified · ${r.buyers} bought · ${timeAgo(r.created_at)}</div></div>
-    <span class="pill ${r.status==='open'?'red':'gray'}">${esc(r.status.toUpperCase())}</span>
-  </div></div>`).join('') || '<div class="card"><span class="muted">No requests yet</span></div>'}`;
+    <span style="display:inline-flex; gap:8px; align-items:center">
+      <span class="pill ${r.revenue_cents?'solid':'gray'}">${fmt$(r.revenue_cents)}</span>
+      <span class="pill ${r.status==='open'?'red':'gray'}">${esc(r.status.toUpperCase())}</span>
+      <span style="color:var(--red)">${ic('arrowR',16)}</span></span>
+  </div></div>`).join('') || '<div class="card" style="text-align:center"><span class="muted">Nothing here</span></div>'}`;
+}
+async function vARequest(){
+  const d = await api('GET', '/admin/requests/' + S.adminRequestId);
+  const r = d.request, dr = d.driver;
+  const t = r.truck || {}, tr = r.trailer || {};
+  const thread = list => list.length
+    ? `<div class="chatbox" style="margin-top:10px">${list.map(m=>`
+        <div class="msg ${m.quote ? 'quotecard' : (m.from_driver ? 'them' : 'me')}" style="max-width:88%">
+          <b class="k" style="font-size:10.5px; opacity:.75">${m.from_driver ? esc(dr.name || 'Driver') : esc(m.sender_name)}</b><br>
+          ${m.quote ? `${ic('tag',13)} QUOTE ${fmt$(m.quote.amount_cents)}${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}` : esc(m.body)}
+          <span class="t">${new Date(m.created_at).toLocaleString()}</span></div>`).join('')}</div>`
+    : '<div class="faint" style="margin-top:8px">No messages in this thread</div>';
+  return `
+  <button class="back" onclick="nav('a-requests')">${ic('chevL',15)} All requests</button>
+  <div class="row" style="margin-top:8px; flex-wrap:wrap; gap:8px">
+    <h2 class="scr" style="margin:0; display:flex; align-items:center; gap:8px">${ic(svcIcon(r.service_key),21)} Request #${r.id}</h2>
+    <span style="display:inline-flex; gap:6px">
+      ${r.licensed_only ? '<span class="pill dark">LICENSED ONLY</span>' : ''}
+      <span class="pill ${r.status==='open'?'red':'solid'}">${esc(r.status.toUpperCase())}</span>
+    </span>
+  </div>
+  <p class="scrsub" style="margin-top:4px">${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} compan${r.notified_count===1?'y':'ies'} alerted · ${d.buyers.length} bought · <b style="color:var(--red)">${fmt$(d.revenue_cents)} revenue</b></p>
+
+  <div class="cols2"><div>
+  <div class="card">
+    <span class="sec">Who sent it</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Driver</span> &nbsp;<a onclick="nav('a-driver',{adminDriverId:${r.driver_id}})">${esc(dr.name || 'unnamed')} ›</a><br>
+      <span class="muted">Phone</span> &nbsp;${esc(dr.phone)}<br>
+      <span class="muted">Company</span> &nbsp;${esc(dr.company || '—')}<br>
+      <span class="muted">Type</span> &nbsp;${esc(dr.type || '—')}${dr.rating ? ` · rated ${dr.rating} by providers` : ''}
+    </div>
+  </div>
+  <div class="card">
+    <span class="sec">What was in the request</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Problem</span> &nbsp;${r.description ? '"'+esc(r.description)+'"' : '<span style="color:var(--muted)">no description given</span>'}<br>
+      <span class="muted">Mobility</span> &nbsp;${r.can_move==='no' ? "Can't move" : r.can_move==='short' ? 'Can limp a short distance' : 'Can move'}<br>
+      <span class="muted">Situation</span> &nbsp;${(r.situation||[]).map(esc).join(' · ') || '—'}<br>
+      <span class="muted">Area shown</span> &nbsp;${esc(r.area_label)}<br>
+      <span class="muted">Exact spot</span> &nbsp;${esc(r.landmark || '—')}<br>
+      <span class="muted">GPS</span> &nbsp;<a href="https://maps.google.com/?q=${r.lat},${r.lng}" target="_blank">${r.lat.toFixed(4)}, ${r.lng.toFixed(4)} ›</a><br>
+      <span class="muted">Photos</span> &nbsp;${(r.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">view</a>`).join(' · ') || 'none'}
+    </div>
+  </div>
+  <div class="card">
+    <span class="sec">Equipment on the request</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Truck</span> &nbsp;${esc([t.year,t.make,t.model,t.engine,t.color].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">Tires</span> &nbsp;${esc([t.steer,t.drive].filter(Boolean).join(' / ') || '—')}<br>
+      <span class="muted">Trailer</span> &nbsp;${esc([tr.type,tr.len,tr.axles].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">Hazmat</span> &nbsp;${tr.hazmat ? `<span style="color:var(--red);font-weight:700">Class ${esc(tr.hzClass)} · UN ${esc(tr.un)}</span>` : 'No'}
+    </div>
+  </div>
+  ${d.reviews.length ? `<div class="card"><span class="sec">Reviews from this job</span>
+    ${d.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">by ${esc(rv.reviewer_name)} · ${timeAgo(rv.created_at)}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
+  </div><div>
+
+  <div class="card">
+    <span class="sec">Who bought this lead (${d.buyers.length} of 4)</span>
+    ${d.buyers.map(b=>`
+      <div style="border-top:1px solid var(--border); margin-top:10px; padding-top:10px">
+        <div class="row">
+          <div><b class="mini k"><a onclick="nav('a-provider',{adminProviderId:${b.provider_id}})">${esc(b.provider_name)} ›</a></b>
+            <div class="faint">Slot ${b.slot}${b.premium?' (premium)':''} · ${esc(b.provider_phone)} · bought ${timeAgo(b.created_at)}${b.license_verified?' · licensed':''}</div></div>
+          <span style="display:inline-flex; gap:6px">
+            ${r.selected_provider===b.provider_id ? '<span class="pill solid">WON</span>' : ''}
+            <span class="pill ${b.refunded?'gray':'dark'}">${b.refunded ? 'REFUNDED' : fmt$(b.amount_cents)}</span>
+          </span>
+        </div>
+        ${thread(b.thread)}
+      </div>`).join('') || '<div class="faint" style="margin-top:8px">Nobody bought this lead — it was alerted to ' + r.notified_count + ' companies</div>'}
+  </div>
+  ${d.orphan_threads.length ? `<div class="card"><span class="sec">Other message threads</span>
+    ${d.orphan_threads.map(o=>thread(o.thread)).join('')}</div>` : ''}
+  </div></div>`;
 }
 
 /* ---------------- shell & render ---------------- */
@@ -1239,7 +1413,8 @@ const VIEWS = {
   'p-feed': vPFeed, 'p-lead': vPLead, 'p-myleads': vPMyLeads, 'p-chat': ()=>chatView('p-threads'), 'p-threads': vThreads,
   'p-stats': vPStats, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
-  'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-requests': vARequests
+  'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-requests': vARequests, 'a-request': vARequest,
+  'a-drivers': vADrivers, 'a-driver': vADriver
 };
 const AUTH_LAYOUT = new Set(['signin','code','d-setup1','d-setup2','d-setup3','p-setup1','p-setup2','p-setup3','p-setup4','p-setup5','loading']);
 const NAVS = {
@@ -1256,10 +1431,11 @@ const NAVS = {
   admin: [
     {ico:'home', label:'Overview', v:'a-home'},
     {ico:'check', label:'Providers', v:'a-providers', also:['a-provider']},
+    {ico:'user', label:'Drivers', v:'a-drivers', also:['a-driver']},
     {ico:'tag', label:'Pricing', v:'a-pricing'},
     {ico:'card', label:'Sales', v:'a-purchases'},
     {ico:'plus', label:'Services', v:'a-custom'},
-    {ico:'zap', label:'Requests', v:'a-requests'}]
+    {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']}]
 };
 let renderSeq = 0;
 async function render(){

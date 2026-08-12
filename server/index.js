@@ -17,8 +17,31 @@ app.use(attachUser);
 
 app.use('/api', routes);
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
-app.use(express.static(path.join(__dirname, '..', 'public')));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+// index:false so the cache-busting handler below always renders index.html itself
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
+
+// ---- cache-busting ----
+// index.html is never cached, and it stamps the current build number onto app.js /
+// styles.css. When you deploy an update, browsers fetch the new files automatically
+// instead of running stale code until someone thinks to hard-refresh.
+const fs = require('fs');
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+function buildStamp() {
+  let newest = 0;
+  for (const f of ['app.js', 'icons.js', 'styles.css', 'index.html']) {
+    try { newest = Math.max(newest, fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs); } catch (e) {}
+  }
+  return String(Math.round(newest));
+}
+let BUILD = buildStamp();
+function sendIndex(req, res) {
+  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
+    if (err) return res.status(500).send('Could not load the app');
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(html.replace(/__BUILD__/g, BUILD));
+  });
+}
+app.get('*', sendIndex);
 
 // central error handler
 app.use((err, req, res, next) => {

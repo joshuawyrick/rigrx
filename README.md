@@ -18,6 +18,7 @@ Built with Node.js + Express + PostgreSQL + WebSockets. No build step — deploy
 | Database schema | `server/schema.sql` | Creates all tables automatically on first boot |
 | Seed data | `server/seed.js` | Demo driver, approved demo provider, pending provider for your admin queue |
 | Front-end | `public/` | The full app — sign-in, driver + company onboarding, dashboards, chat, admin panel |
+| Geocoding | `server/geo.js` | Turns GPS into a readable area ("Near Buttonwillow, CA") with no API key or cost |
 
 ## The three roles
 
@@ -80,6 +81,17 @@ Leave the Stripe/Twilio secrets out for now — the app runs fully in simulation
 4. Window A: choose the company → mark complete → leave a rating.
 5. Sign in with your `ADMIN_PHONE` → approve the pending "Valley Tire Rescue," tweak pricing, see revenue.
 
+## The admin dashboard
+
+Every number on the Overview page is clickable and opens the data behind it:
+
+- **Requests / Fill rate** → the request list, filterable by last-24h, sold, and unsold
+- **Revenue** → every lead sale, with the buyer, the driver, and a link to the request
+- **Drivers** → who is requesting help, their saved equipment, and their full request history
+- **Providers** → the company review dossier (see above)
+
+Opening any request shows the complete picture: who sent it, everything they entered, the exact GPS and landmark, which companies bought it and for how much, and **every message exchanged between the driver and each provider**, plus any reviews left afterwards.
+
 ## Local development (optional)
 
 ```bash
@@ -93,7 +105,7 @@ npm start                   # http://localhost:3000
 
 These are known gaps to close as the business grows — none block launch-in-simulation or a pilot:
 - Stripe: use SetupIntents to collect cards in-app (right now real mode expects a customer with a saved default payment method — add the card-collection page when you connect Stripe)
-- Geocoding: area labels are typed by the driver; add Google/Mapbox reverse-geocoding for automatic "Near Buttonwillow on I-5" labels + provider address → lat/lng lookup (locations currently use a city picker)
+- Geocoding: `server/geo.js` resolves coordinates from a bundled place list (no key, no cost). Accurate around California and major corridors, coarser in remote areas — swap the body of `areaLabel()` for a Google/Mapbox call for street-level accuracy nationwide. Provider locations still use a city picker.
 - Auto-expiry job for stale open requests (e.g. close after 4 hours)
 - Rate limiting on the OTP endpoint (basic per-driver open-request cap exists)
 - Terms of service + privacy policy pages before charging real money

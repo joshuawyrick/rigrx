@@ -8,6 +8,7 @@ const auth = require('./auth');
 const { chargeLead, refund, SIMULATED } = require('./payments');
 const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, haversineMiles, distanceBand } = require('./match');
+const { areaLabel } = require('./geo');
 
 const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
@@ -21,6 +22,14 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 8 * 1024 * 1024 } });
 router.post('/upload', auth.requireAuth, upload.single('file'), (req, res) => {
   res.json({ url: '/uploads/' + req.file.filename });
+});
+
+/* ---------------- geocoding ---------------- */
+// Live preview for the driver: coordinates -> "Near Buttonwillow, CA"
+router.get('/geo', (req, res) => {
+  const lat = parseFloat(req.query.lat), lng = parseFloat(req.query.lng);
+  if (isNaN(lat) || isNaN(lng)) return res.status(400).json({ error: 'lat/lng required' });
+  res.json({ area_label: areaLabel(lat, lng) });
 });
 
 /* ---------------- auth ---------------- */
@@ -190,7 +199,7 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
                           situation, can_move, description, photos, truck, trailer, licensed_only)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
-     b.area_label || 'Near your GPS location', b.landmark || '',
+     areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
      JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly]);
   // remember the driver's preference for next time
@@ -605,12 +614,15 @@ router.put('/admin/pricing/:key', auth.requireRole('admin'), async (req, res) =>
 });
 
 router.get('/admin/purchases', auth.requireRole('admin'), async (req, res) => {
+  const win = req.query.window === '24h' ? `WHERE pu.created_at > NOW() - INTERVAL '24 hours'` : '';
   const rows = await q(`
-    SELECT pu.*, p.name AS provider_name, r.service_label
+    SELECT pu.*, p.name AS provider_name, r.service_label, r.area_label, r.status AS request_status,
+           r.selected_provider, u.name AS driver_name
     FROM purchases pu JOIN providers p ON p.user_id=pu.provider_id
     JOIN requests r ON r.id=pu.request_id
-    ORDER BY pu.id DESC LIMIT 100`);
-  res.json(rows);
+    JOIN users u ON u.id=r.driver_id
+    ${win} ORDER BY pu.id DESC LIMIT 100`);
+  res.json(rows.map(x => ({ ...x, won: x.selected_provider === x.provider_id })));
 });
 router.post('/admin/purchases/:id/refund', auth.requireRole('admin'), async (req, res) => {
   const pu = await one('SELECT * FROM purchases WHERE id=$1', [req.params.id]);
@@ -634,11 +646,98 @@ router.post('/admin/custom-services/:id/:action', auth.requireRole('admin'), asy
 });
 
 router.get('/admin/requests', auth.requireRole('admin'), async (req, res) => {
+  const win = req.query.window === '24h' ? `WHERE r.created_at > NOW() - INTERVAL '24 hours'`
+            : req.query.filled === '1' ? `WHERE EXISTS (SELECT 1 FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE)`
+            : req.query.unfilled === '1' ? `WHERE NOT EXISTS (SELECT 1 FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE)`
+            : '';
   const rows = await q(`
-    SELECT r.id, r.service_label, r.area_label, r.status, r.notified_count, r.created_at, u.name AS driver_name,
-      (SELECT COUNT(*)::int FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE) AS buyers
-    FROM requests r JOIN users u ON u.id=r.driver_id ORDER BY r.id DESC LIMIT 100`);
+    SELECT r.id, r.service_label, r.area_label, r.status, r.notified_count, r.created_at,
+           r.licensed_only, u.name AS driver_name, u.phone AS driver_phone,
+      (SELECT COUNT(*)::int FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE) AS buyers,
+      (SELECT COALESCE(SUM(amount_cents),0)::int FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE) AS revenue_cents
+    FROM requests r JOIN users u ON u.id=r.driver_id ${win} ORDER BY r.id DESC LIMIT 100`);
   res.json(rows);
+});
+
+// Everything about one request: what the driver sent, who bought it, and every
+// message exchanged with each provider.
+router.get('/admin/requests/:id', auth.requireRole('admin'), async (req, res) => {
+  const r = await one(`
+    SELECT r.*, u.name AS driver_name, u.phone AS driver_phone, u.email AS driver_email,
+           u.company AS driver_company, u.driver_type,
+           u.rating_sum AS d_rsum, u.rating_count AS d_rcount
+    FROM requests r JOIN users u ON u.id=r.driver_id WHERE r.id=$1`, [req.params.id]);
+  if (!r) return res.status(404).json({ error: 'Not found' });
+
+  const buyers = await q(`
+    SELECT pu.*, p.name AS provider_name, u.phone AS provider_phone, p.license_verified
+    FROM purchases pu JOIN providers p ON p.user_id=pu.provider_id
+    JOIN users u ON u.id=pu.provider_id
+    WHERE pu.request_id=$1 ORDER BY pu.slot`, [req.params.id]);
+
+  // group every message into a thread per provider
+  const msgs = await q(`
+    SELECT m.*, COALESCE(p.name, u.name, 'Driver') AS sender_name,
+           (m.sender_id = $2) AS from_driver
+    FROM messages m
+    LEFT JOIN providers p ON p.user_id = m.sender_id
+    LEFT JOIN users u ON u.id = m.sender_id
+    WHERE m.request_id=$1 ORDER BY m.id`, [req.params.id, r.driver_id]);
+  const threads = {};
+  for (const m of msgs) {
+    (threads[m.provider_id] = threads[m.provider_id] || []).push(m);
+  }
+
+  const reviews = await q(`
+    SELECT rv.*, u.name AS reviewer_name FROM reviews rv
+    JOIN users u ON u.id=rv.reviewer_id WHERE rv.request_id=$1`, [req.params.id]);
+
+  res.json({
+    request: r,
+    driver: {
+      name: r.driver_name, phone: r.driver_phone, email: r.driver_email,
+      company: r.driver_company, type: r.driver_type,
+      rating: r.d_rcount ? +(r.d_rsum / r.d_rcount).toFixed(1) : null
+    },
+    buyers: buyers.map(b => ({
+      ...b,
+      thread: threads[b.provider_id] || []
+    })),
+    orphan_threads: Object.entries(threads)
+      .filter(([pid]) => !buyers.some(b => b.provider_id === Number(pid)))
+      .map(([pid, thread]) => ({ provider_id: Number(pid), thread })),
+    reviews,
+    revenue_cents: buyers.filter(b => !b.refunded).reduce((a, b) => a + b.amount_cents, 0)
+  });
+});
+
+// Drivers list + one driver's history
+router.get('/admin/drivers', auth.requireRole('admin'), async (req, res) => {
+  const rows = await q(`
+    SELECT u.id, u.name, u.phone, u.email, u.company, u.driver_type, u.created_at,
+      (SELECT COUNT(*)::int FROM requests r WHERE r.driver_id=u.id) AS requests,
+      (SELECT COUNT(*)::int FROM trucks t WHERE t.user_id=u.id) AS trucks,
+      (SELECT COALESCE(SUM(pu.amount_cents),0)::int FROM purchases pu
+        JOIN requests r ON r.id=pu.request_id WHERE r.driver_id=u.id AND pu.refunded=FALSE) AS revenue_cents
+    FROM users u WHERE u.role='driver' ORDER BY u.id DESC LIMIT 100`);
+  res.json(rows);
+});
+
+router.get('/admin/drivers/:id', auth.requireRole('admin'), async (req, res) => {
+  const u = await one(`SELECT * FROM users WHERE id=$1 AND role IN ('driver','admin')`, [req.params.id]);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  const [trucks, trailers, requests] = await Promise.all([
+    q('SELECT * FROM trucks WHERE user_id=$1', [req.params.id]),
+    q('SELECT * FROM trailers WHERE user_id=$1', [req.params.id]),
+    q(`SELECT r.*,
+        (SELECT COUNT(*)::int FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE) AS buyers,
+        (SELECT COALESCE(SUM(amount_cents),0)::int FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE) AS revenue_cents
+       FROM requests r WHERE r.driver_id=$1 ORDER BY r.id DESC LIMIT 50`, [req.params.id])
+  ]);
+  res.json({
+    driver: { ...u, rating: u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(1) : null },
+    trucks, trailers, requests
+  });
 });
 
 module.exports = router;
