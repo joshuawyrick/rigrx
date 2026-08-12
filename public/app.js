@@ -35,11 +35,12 @@ const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
   activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null,
-  leadId: null, simulatedPayments: true, catalog: [], trades: []
+  leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy'
 };
 async function loadCatalog(){
   try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
   try { S.trades = await api('GET', '/trades'); } catch(e){ S.trades = []; }
+  try { S.equipment = await api('GET', '/equipment'); } catch(e){ S.equipment = {}; }
 }
 const tradeByKey = k => (S.trades || []).find(t => t.key === k) || null;
 const tradeLabel = k => tradeByKey(k)?.label || '';
@@ -160,6 +161,46 @@ async function signOut(){
   nav('signin');
 }
 
+
+/* ---------------- dropdowns with an "Other…" escape hatch ---------------- */
+// Every list is a suggestion. Picking "Other…" reveals a text box and quietly
+// logs what they typed so the lists can be improved from real usage.
+function sel(id, options, current, opts = {}){
+  const list = options || [];
+  const known = list.includes(current);
+  const isOther = current && !known;
+  return `
+  <select id="${id}" onchange="onSelChange('${id}')" data-field="${opts.field || id}">
+    <option value="">${opts.placeholder || 'Select…'}</option>
+    ${list.map(o=>`<option ${o===current?'selected':''}>${esc(o)}</option>`).join('')}
+    <option value="__other" ${isOther?'selected':''}>Other…</option>
+  </select>
+  <input type="text" id="${id}-other" placeholder="${opts.otherPlaceholder || 'Type it in'}"
+    value="${isOther?esc(current):''}" style="margin-top:7px; display:${isOther?'block':'none'}">`;
+}
+function onSelChange(id){
+  const box = $(id + '-other');
+  if (!box) return;
+  const other = $(id).value === '__other';
+  box.style.display = other ? 'block' : 'none';
+  if (other) box.focus();
+}
+// Read a select+other pair as one value
+function selVal(id){
+  const el = $(id); if (!el) return '';
+  if (el.value === '__other') {
+    const typed = ($(id + '-other')?.value || '').trim();
+    if (typed) logOther(el.dataset.field || id, typed);
+    return typed;
+  }
+  return el.value;
+}
+function logOther(field, value){
+  api('POST', '/other-entry', { field, value, duty_class: S.dutyClass || '' }).catch(()=>{});
+}
+const EQ = () => S.equipment || {};
+const forClass = (map, cls) => (map || {})[cls || 'heavy'] || [];
+
 /* ---------------- driver setup (first sign-in) ---------------- */
 function progress(step, total){ return `<div class="progress">${Array.from({length: total},(_,i)=>`<i class="${i<step?'on':''}"></i>`).join('')}</div>`; }
 
@@ -186,45 +227,83 @@ async function saveDSetup1(){
   S.me = d.user;
   nav('d-setup2');
 }
-function truckForm(t = {}){
+// Duty class drives every list below it, so it is the first question asked.
+function setDutyClass(cls){
+  if (S.dutyClass === cls) return;
+  const keep = S.view === 'd-setup2' ? readTruckForm() : null;
+  S.dutyClass = cls;
+  if (keep) S.editTruck = { ...(S.editTruck || {}), ...keep, duty: cls };
+  render();
+}
+function dutyPicker(current){
+  const list = EQ().DUTY_CLASSES || [];
   return `
+  <label class="f">What size truck is this?</label>
+  <div class="dutyrow">
+    ${list.map(d=>`
+    <div class="dutycard ${d.key===current?'sel':''}" onclick="setDutyClass('${d.key}')">
+      <b>${esc(d.label)}</b><span>${esc(d.blurb)}</span>
+    </div>`).join('')}
+  </div>`;
+}
+// The model list depends on the make, so it redraws whenever the make changes.
+function modelOptions(make){ return (EQ().MODELS || {})[make] || []; }
+function onMakeChange(){
+  const make = selVal('tk-make');
+  const wrap = $('tk-model-wrap');
+  if (wrap) wrap.innerHTML = sel('tk-model', modelOptions(make), '', { placeholder: 'Select model…', field: 'truck_model' });
+  onSelChange('tk-make');
+}
+function truckForm(t = {}){
+  const cls = S.dutyClass || t.duty || 'heavy';
+  const yrs = []; for (let y = new Date().getFullYear() + 1; y >= 1990; y--) yrs.push(String(y));
+  return `
+  ${dutyPicker(cls)}
   <div class="grid2">
-    <div><label class="f">Unit #</label><input type="text" id="tk-unit" value="${esc(t.unit)}"></div>
-    <div><label class="f">Year</label><input type="text" id="tk-year" value="${esc(t.year)}"></div>
+    <div><label class="f">Unit #</label><input type="text" id="tk-unit" value="${esc(t.unit)}" placeholder="Optional"></div>
+    <div><label class="f">Year</label>${sel('tk-year', yrs, t.year, { placeholder: 'Select year…', field: 'truck_year' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Make</label><input type="text" id="tk-make" value="${esc(t.make)}" placeholder="Peterbilt, Freightliner…"></div>
-    <div><label class="f">Model</label><input type="text" id="tk-model" value="${esc(t.model)}"></div>
-  </div>
-  <label class="f">Engine</label>
-  <div class="chips" id="tk-engine">
-    ${['Cummins','Detroit','Paccar','Volvo','Mack','CAT','International'].map(e=>`<span class="chip ${e===t.engine?'sel':''}" onclick="togOne(this)">${e}</span>`).join('')}
-  </div>
-  <div class="grid2">
-    <div><label class="f">Transmission</label><input type="text" id="tk-trans" value="${esc(t.trans)}"></div>
-    <div><label class="f">Axles</label><input type="text" id="tk-axles" value="${esc(t.axles)}" placeholder="Tandem"></div>
-  </div>
-  <div class="grid2">
-    <div><label class="f">Steer tire size</label><input type="text" id="tk-steer" value="${esc(t.steer)}" placeholder="295/75R22.5"></div>
-    <div><label class="f">Drive tire size</label><input type="text" id="tk-drive" value="${esc(t.drive)}" placeholder="11R24.5"></div>
+    <div><label class="f">Make</label>
+      <select id="tk-make" onchange="onMakeChange()" data-field="truck_make">
+        <option value="">Select make…</option>
+        ${forClass(EQ().MAKES, cls).map(m=>`<option ${m===t.make?'selected':''}>${esc(m)}</option>`).join('')}
+        <option value="__other" ${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'selected':''}>Other…</option>
+      </select>
+      <input type="text" id="tk-make-other" placeholder="Type the make"
+        value="${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? esc(t.make) : ''}"
+        style="margin-top:7px; display:${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'block':'none'}">
+    </div>
+    <div><label class="f">Model</label><div id="tk-model-wrap">${sel('tk-model', modelOptions(t.make), t.model, { placeholder: 'Select model…', field: 'truck_model' })}</div></div>
   </div>
   <div class="grid2">
-    <div><label class="f">Wheels</label><input type="text" id="tk-wheels" value="${esc(t.wheels)}" placeholder="Aluminum / steel"></div>
-    <div><label class="f">Color</label><input type="text" id="tk-color" value="${esc(t.color)}"></div>
+    <div><label class="f">Engine</label>${sel('tk-engine', forClass(EQ().ENGINES, cls), t.engine, { placeholder: 'Select engine…', field: 'truck_engine' })}</div>
+    <div><label class="f">Transmission</label>${sel('tk-trans', forClass(EQ().TRANSMISSIONS, cls), t.trans, { placeholder: 'Select transmission…', field: 'truck_trans' })}</div>
+  </div>
+  <label class="f">Axle configuration</label>${sel('tk-axles', forClass(EQ().AXLE_CONFIGS, cls), t.axles, { placeholder: 'Select axles…', field: 'truck_axles' })}
+  <div class="grid2">
+    <div><label class="f">Steer tire size</label>${sel('tk-steer', forClass(EQ().TIRE_SIZES, cls), t.steer, { placeholder: 'Select size…', field: 'steer_tire', otherPlaceholder: 'e.g. 295/75R22.5' })}</div>
+    <div><label class="f">Drive tire size</label>${sel('tk-drive', forClass(EQ().TIRE_SIZES, cls), t.drive, { placeholder: 'Select size…', field: 'drive_tire', otherPlaceholder: 'e.g. 11R24.5' })}</div>
+  </div>
+  <div class="grid2">
+    <div><label class="f">Wheels</label>${sel('tk-wheels', EQ().WHEEL_TYPES || [], t.wheels, { placeholder: 'Select…', field: 'wheels' })}</div>
+    <div><label class="f">Color</label>${sel('tk-color', EQ().TRUCK_COLORS || [], t.color, { placeholder: 'Select color…', field: 'truck_color' })}</div>
   </div>
   <label class="f">VIN (optional — speeds up parts)</label><input type="text" id="tk-vin" value="${esc(t.vin)}">
-  <label class="f">Extras</label>
+  <label class="f">Extras (optional)</label>
   <div class="chips" id="tk-extras">
-    ${['APU','Wet kit / PTO','Inverter'].map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" onclick="tog(this)">${e}</span>`).join('')}
+    ${(EQ().TRUCK_EXTRAS || []).map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" onclick="tog(this)">${esc(e)}</span>`).join('')}
   </div>`;
 }
 function readTruckForm(){
-  return { unit: qv('tk-unit'), year: qv('tk-year'), make: qv('tk-make'), model: qv('tk-model'),
-    engine: selOf('tk-engine')[0] || '', trans: qv('tk-trans'), axles: qv('tk-axles'),
-    steer: qv('tk-steer'), drive: qv('tk-drive'), wheels: qv('tk-wheels'),
-    color: qv('tk-color'), vin: qv('tk-vin'), extras: selOf('tk-extras') };
+  return { duty: S.dutyClass || 'heavy', unit: qv('tk-unit'), year: selVal('tk-year'),
+    make: selVal('tk-make'), model: selVal('tk-model'),
+    engine: selVal('tk-engine'), trans: selVal('tk-trans'), axles: selVal('tk-axles'),
+    steer: selVal('tk-steer'), drive: selVal('tk-drive'), wheels: selVal('tk-wheels'),
+    color: selVal('tk-color'), vin: qv('tk-vin'), extras: selOf('tk-extras') };
 }
 function vDSetup2(){
+  if (S.editTruck?.duty) S.dutyClass = S.editTruck.duty;
   return authShell(`
   <button class="back" onclick="nav('d-setup1')">${ic('chevL',15)} Back</button>
   ${progress(2,3)}
@@ -243,36 +322,43 @@ async function saveDSetup2(){
   nav('d-setup3');
 }
 function trailerForm(r = {}){
+  // A trailer can be pulled by any size truck, so its tire list is the union of all
+  // classes rather than whatever the tractor happens to be.
+  const allTires = [...new Set([].concat(
+    forClass(EQ().TIRE_SIZES, 'heavy'), forClass(EQ().TIRE_SIZES, 'medium'), forClass(EQ().TIRE_SIZES, 'light')))];
   return `
   <label class="f">Trailer type</label>
-  <div class="chips" id="tr-type">
-    ${['Dry van','Reefer','Flatbed','Tanker — crude','Tanker — fuel','Tanker — chemical','Step deck','End dump','Hopper','Lowboy / RGN','Car hauler','Container chassis','Conestoga','None / bobtail'].map(x=>`<span class="chip ${x===r.type?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+  ${sel('tr-type', EQ().TRAILER_TYPES || [], r.type, { placeholder: 'Select trailer type…', field: 'trailer_type' })}
+  <div class="grid2">
+    <div><label class="f">Trailer #</label><input type="text" id="tr-num" value="${esc(r.num)}" placeholder="Optional"></div>
+    <div><label class="f">Length</label>${sel('tr-len', EQ().TRAILER_LENGTHS || [], r.len, { placeholder: 'Select length…', field: 'trailer_length' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Trailer #</label><input type="text" id="tr-num" value="${esc(r.num)}"></div>
-    <div><label class="f">Length</label><input type="text" id="tr-len" value="${esc(r.len)}" placeholder="53'"></div>
+    <div><label class="f">Axles</label>${sel('tr-axles', EQ().TRAILER_AXLES || [], r.axles, { placeholder: 'Select…', field: 'trailer_axles' })}</div>
+    <div><label class="f">Suspension</label>${sel('tr-susp', EQ().SUSPENSIONS || [], r.susp, { placeholder: 'Select…', field: 'trailer_susp' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Axles / suspension</label><input type="text" id="tr-axles" value="${esc(r.axles)}" placeholder="Tandem · air ride"></div>
-    <div><label class="f">Tire size</label><input type="text" id="tr-tires" value="${esc(r.tires)}"></div>
+    <div><label class="f">Tire size</label>${sel('tr-tires', allTires, r.tires, { placeholder: 'Select size…', field: 'trailer_tire' })}</div>
+    <div><label class="f">Reefer unit (if reefer)</label>${sel('tr-reefer', EQ().REEFER_MAKES || [], r.reefer, { placeholder: 'Not a reefer', field: 'reefer_make' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Reefer unit (if reefer)</label><input type="text" id="tr-reefer" value="${esc(r.reefer)}" placeholder="Thermo King / Carrier"></div>
-    <div><label class="f">Liftgate</label><input type="text" id="tr-liftgate" value="${esc(r.liftgate)}" placeholder="No"></div>
+    <div><label class="f">Doors</label>${sel('tr-doors', EQ().DOOR_TYPES || [], r.doors, { placeholder: 'Select…', field: 'trailer_doors' })}</div>
+    <div><label class="f">Liftgate</label>${sel('tr-liftgate', ['No','Yes'], r.liftgate, { placeholder: 'Select…', field: 'liftgate' })}</div>
   </div>
   <div class="card alert" style="margin-top:12px">
     <div class="row"><span class="mini k">${ic('warn',15)} Hazmat placarded</span>
       <span class="chips" id="tr-hz"><span class="chip ${r.hazmat?'sel':''}" onclick="togOne(this)">Yes</span><span class="chip ${r.hazmat?'':'sel'}" onclick="togOne(this)">No</span></span></div>
     <div class="grid2" style="margin-top:8px">
-      <div><label class="f" style="margin-top:0">Class</label><input type="text" id="tr-class" value="${esc(r.hzClass)}" placeholder="3 — Flammable"></div>
+      <div><label class="f" style="margin-top:0">Class</label>${sel('tr-class', EQ().HAZMAT_CLASSES || [], r.hzClass, { placeholder: 'Select class…', field: 'hazmat_class' })}</div>
       <div><label class="f" style="margin-top:0">UN #</label><input type="text" id="tr-un" value="${esc(r.un)}" placeholder="1267"></div>
     </div>
     <div class="faint" style="margin-top:7px">Providers see this before they buy — tow operators must know</div>
   </div>`;
 }
 function readTrailerForm(){
-  return { type: selOf('tr-type')[0] || '', num: qv('tr-num'), len: qv('tr-len'),
-    axles: qv('tr-axles'), tires: qv('tr-tires'), reefer: qv('tr-reefer'), liftgate: qv('tr-liftgate'),
+  return { type: selVal('tr-type'), num: qv('tr-num'), len: selVal('tr-len'),
+    axles: selVal('tr-axles'), susp: selVal('tr-susp'), tires: selVal('tr-tires'),
+    reefer: selVal('tr-reefer'), doors: selVal('tr-doors'), liftgate: selVal('tr-liftgate'),
     hazmat: selOf('tr-hz')[0] === 'Yes', hzClass: qv('tr-class'), un: qv('tr-un') };
 }
 function vDSetup3(){
@@ -289,7 +375,7 @@ function vDSetup3(){
 }
 async function saveDSetup3(){
   const data = readTrailerForm();
-  if (data.type && data.type !== 'None / bobtail'){
+  if (data.type && !/bobtail/i.test(data.type)){
     if (S.editTrailer?.id) await api('PUT', '/trailers/' + S.editTrailer.id, { data });
     else await api('POST', '/trailers', { data });
   }
@@ -328,7 +414,8 @@ function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no',
               lat: null, lng: null, photos: [],
               licensed_only: !!S.me?.prefer_licensed_only,   // remembers last choice
-              trade_filter: [] };
+              trade_filter: [],
+              duty_class: S.trucks?.[0]?.data?.duty || 'heavy' };
   nav('d-request');
 }
 function vDRequest(){
@@ -451,6 +538,7 @@ function saveDetails(){
   const d = S.draft;
   d.truck_id = Number($('rq-truck').querySelector('.chip.sel')?.dataset.id) || null;
   d.trailer_id = Number($('rq-trailer').querySelector('.chip.sel')?.dataset.id) || null;
+  d.duty_class = S.trucks.find(x=>x.id===d.truck_id)?.data?.duty || d.duty_class || 'heavy';
   d.situation = selOf('rq-situation');
   d.can_move = $('rq-move').querySelector('.chip.sel')?.dataset.v || 'no';
   d.description = qv('rq-desc');
@@ -574,7 +662,8 @@ async function previewMatches(){
   if (!el || !d.lat) return;
   try {
     const qs = `lat=${d.lat}&lng=${d.lng}&service_key=${encodeURIComponent(d.service_key)}` +
-               `&licensed_only=${d.licensed_only ? 1 : 0}&trades=${encodeURIComponent(JSON.stringify(d.trade_filter))}`;
+               `&licensed_only=${d.licensed_only ? 1 : 0}&trades=${encodeURIComponent(JSON.stringify(d.trade_filter))}` +
+               `&duty_class=${encodeURIComponent(d.duty_class || 'heavy')}`;
     const p = await api('GET', '/requests/preview?' + qs);
     const narrowed = d.licensed_only || d.trade_filter.length;
     el.innerHTML = p.matches === 0
@@ -613,7 +702,12 @@ async function vDActive(){
       <div style="height:10px"></div>
       <button class="btn" onclick="openToAll(${r.id})">Send to all approved companies instead</button>
     </div>` : ''}
-  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
+  ${r.notified_count === 0 && r.status === 'open' && !(r.licensed_only || (r.trade_filter||[]).length) && (r.duty_class && r.duty_class !== 'heavy') ? `
+    <div class="card alert">
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">No ${r.duty_class === 'medium' ? 'medium' : 'light'}-duty companies cover this area yet.</b>
+      The shops nearby have told us they only work on heavy trucks. Your request stays open in case one widens their coverage — call around in the meantime.</div>
+    </div>` : ''}
+  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) && !(r.notified_count === 0 && r.duty_class && r.duty_class !== 'heavy') ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
   ${filled > 0 && r.status === 'open' ? `<div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">Message them before you choose.</b> Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.</div>
   </div>` : ''}
@@ -750,7 +844,7 @@ async function vDGarage(){
   <p class="scrsub">Saved rigs make requests take 30 seconds</p>
   <div class="cols2"><div>
   ${S.trucks.map(x=>`<div class="card">
-    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} Unit ${esc(x.data.unit)} — ${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)}</b>
+    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} ${esc(x.data.unit) ? 'Unit '+esc(x.data.unit)+' — ' : ''}${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)} ${dutyPill(x.data.duty)}</b>
       <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} Edit</span></div>
     <div class="faint" style="margin-top:7px; line-height:1.7">Engine: ${esc(x.data.engine)} · ${esc(x.data.trans)} · ${esc(x.data.axles)}<br>Tires: ${esc(x.data.steer)} / ${esc(x.data.drive)} · ${esc(x.data.wheels)}</div>
   </div>`).join('') || '<div class="card"><a onclick="S.editTruck=null; nav(\'d-setup2\')">+ Add your truck</a></div>'}
@@ -987,6 +1081,13 @@ function vPSetup4(){
   ${progress(4,5)}
   <h2 class="scr">Equipment & capacity</h2>
   <p class="scrsub">Step 4 of 5 — drivers see this as proof you can handle the job</p>
+  <div class="card" style="margin-bottom:16px">
+    <span class="sec">Truck sizes you work on</span>
+    <div class="faint" style="margin:6px 0 10px">Pick every class you'll take. Leads outside your picks never reach you — and medium duty is a busy market most heavy-only shops skip.</div>
+    <div class="chips" id="p-duty">
+      ${(EQ().SERVED_CLASSES || []).map(d=>`<span class="chip ${(S.provider?.duty_classes || ['heavy','medium']).includes(d.key)?'sel':''}" data-k="${d.key}" onclick="tog(this)">${esc(d.label)}</span>`).join('')}
+    </div>
+  </div>
   <div class="grid2">
     <div><label class="f">Heavy wreckers</label><input type="text" id="eq-wreckers" value="${esc(e.wreckers)}"></div>
     <div><label class="f">Rotator</label><input type="text" id="eq-rotator" value="${esc(e.rotator)}" placeholder="No / Yes — 60 ton"></div>
@@ -1014,7 +1115,9 @@ async function savePSetup4(){
   [...($('p-caps')?.querySelectorAll('.chip') || [])].forEach(ch => {
     if (ch.classList.contains('sel')) caps[ch.dataset.k] = true;
   });
-  await api('PUT', '/provider/profile', { capabilities: caps, equipment: {
+  const duty = [...($('p-duty')?.querySelectorAll('.chip.sel') || [])].map(c => c.dataset.k);
+  if (!duty.length) return toast('Pick at least one truck size you work on');
+  await api('PUT', '/provider/profile', { capabilities: caps, duty_classes: duty, equipment: {
     wreckers: qv('eq-wreckers'), rotator: qv('eq-rotator'), service: qv('eq-service'),
     landoll: qv('eq-landoll'), tiretrucks: qv('eq-tire'), fueltrucks: qv('eq-fuel') } });
   await loadMe();
@@ -1082,10 +1185,16 @@ async function vPFeed(){
     `<div class="card" style="border-style:dashed; text-align:center"><span class="faint">${ic('mobile',12)} text + ${ic('bell',12)} live alert the second a matching lead drops</span></div></div></div>`
   : `<div class="card" style="text-align:center; padding:26px"><span class="muted">${ic('clock',14)} No open leads in your area right now.<br><span class="faint">You'll get a text the moment one drops. Widen your radius or add services in Settings to see more.</span></span></div>`}`;
 }
+// A one-word size badge so a heavy-only shop can tell at a glance what rolled in
+function dutyPill(cls){
+  if (!cls || cls === 'heavy') return '<span class="pill gray" style="margin-right:6px">HEAVY</span>';
+  if (cls === 'medium') return '<span class="pill dark" style="margin-right:6px">MEDIUM DUTY</span>';
+  return '<span class="pill dark" style="margin-right:6px">LIGHT DUTY</span>';
+}
 function leadCard(l){
   return `<div class="lead" onclick="nav('p-lead',{leadId:${l.id}})">
     <div class="row"><span class="ty">${ic(svcIcon(l.service_key))} ${esc(l.service_label)}</span><span class="pill ${l.slots.total===0?'solid':'gray'}">${timeAgo(l.created_at)}</span></div>
-    <div class="mini" style="margin:8px 0 3px">${esc(l.truck_class)} + <b class="k">${esc(l.trailer_type)}${l.hazmat ? ' (hazmat)' : ''}</b> · ${l.can_move==='no' ? "can't move" : 'can move'}</div>
+    <div class="mini" style="margin:8px 0 3px">${dutyPill(l.duty_class)}${esc(l.truck_class)} + <b class="k">${esc(l.trailer_type)}${l.hazmat ? ' (hazmat)' : ''}</b> · ${l.can_move==='no' ? "can't move" : 'can move'}</div>
     ${l.tire_position ? `<div class="mini" style="margin:3px 0"><b class="k" style="color:var(--red)">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${l.tire_position.size ? ' — '+esc(l.tire_position.size) : ''}${l.tire_position.problem ? ' · '+esc(l.tire_position.problem) : ''}</div>` : ''}
     ${(l.spec||[]).length ? `<div class="faint" style="margin:3px 0">${l.spec.slice(0,3).map(x=>esc(x.k)+': '+esc(x.v)).join(' · ')}</div>` : ''}
     <div class="muted mini">${ic('pin',12)} ${esc(l.area_label)} · <b class="k">${l.band} from you</b></div>
@@ -1109,7 +1218,7 @@ async function vPLead(){
   <div class="cols2"><div>
   <div class="card">
     <div class="mini listline">
-      <span class="muted">Rig</span> &nbsp;${esc(l.truck_class)} + ${esc(l.trailer_type)}<br>
+      <span class="muted">Rig</span> &nbsp;${dutyPill(l.duty_class)}${esc(l.truck_class)} + ${esc(l.trailer_type)}<br>
       <span class="muted">Hazmat</span> &nbsp;${l.hazmat ? `<span style="color:var(--red);font-weight:700">Yes — Class ${esc(l.hazmat_info?.class)}, UN ${esc(l.hazmat_info?.un)}</span>` : 'No'}<br>
       <span class="muted">Mobility</span> &nbsp;${l.can_move==='no' ? "Can't move under own power" : l.can_move==='short' ? 'Can limp a short distance' : 'Can move'}<br>
       <span class="muted">Area</span> &nbsp;${esc(l.area_label)}<br>
@@ -1234,6 +1343,9 @@ async function vPSettings(){
   </div><div>
   <div class="card">
     <div class="row"><span class="sec">Equipment & capabilities</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup4')">${ic('edit',13)} Edit</span></div>
+    <div class="chips" style="margin-top:7px">
+      ${(p.duty_classes || ['heavy','medium']).map(k=>`<span class="pill red">${k === 'heavy' ? 'HEAVY' : k === 'medium' ? 'MEDIUM DUTY' : 'LIGHT DUTY'}</span>`).join('')}
+    </div>
     <div class="mini" style="margin-top:7px; line-height:1.8">${['wreckers','rotator','service','landoll'].map(k=>p.equipment?.[k] ? esc(p.equipment[k]) + ' ' + k : '').filter(Boolean).join(' · ') || '—'}</div>
     <div class="chips" style="margin-top:10px">
       ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${ic('check',10)} ${esc(label)}</span>`).join('') || '<span class="faint">No capability flags set — you may be missing matching leads</span>'}
@@ -1676,6 +1788,29 @@ async function vACatalog(){
   </div>`).join('')}
   <div class="card" style="background:var(--soft)">
     <div class="mini" style="line-height:1.55">${ic('warn',14)} Categories get turned off rather than deleted, so past requests keep their labels and your revenue reports stay intact. A new category reaches nobody until service companies check something under it — so add them as demand shows up.</div>
+  </div>
+  ${await otherEntriesCard()}`;
+}
+// What people typed when the dropdown didn't have their answer — the shopping list
+// for what to add to the built-in lists.
+async function otherEntriesCard(){
+  let rows = [];
+  try { rows = await api('GET', '/admin/other-entries'); } catch(e){ return ''; }
+  const label = f => ({
+    truck_make:'Truck make', truck_model:'Truck model', truck_year:'Truck year',
+    truck_engine:'Engine', truck_trans:'Transmission', truck_axles:'Axle config',
+    steer_tire:'Steer tire size', drive_tire:'Drive tire size', wheels:'Wheels',
+    truck_color:'Color', trailer_type:'Trailer type', trailer_length:'Trailer length',
+    trailer_axles:'Trailer axles', trailer_susp:'Suspension', trailer_tire:'Trailer tire',
+    reefer_make:'Reefer unit', trailer_doors:'Doors', liftgate:'Liftgate', hazmat_class:'Hazmat class'
+  })[f] || f;
+  return `
+  <div class="card">
+    <span class="sec">"Other" answers — what the dropdowns are missing</span>
+    <div class="faint" style="margin:6px 0 12px">Every time someone picks "Other…" and types their own answer, it lands here. Anything showing up repeatedly belongs in the built-in list.</div>
+    ${rows.length ? `<table class="tbl"><tr><th>Field</th><th>What they typed</th><th>Class</th><th>Times</th><th>Last seen</th></tr>
+      ${rows.map(r=>`<tr><td>${esc(label(r.field))}</td><td><b class="k">${esc(r.value)}</b></td><td>${esc(r.duty_class||'—')}</td><td>${r.times > 1 ? `<span class="pill red">${r.times}</span>` : r.times}</td><td class="faint">${timeAgo(r.last_seen)}</td></tr>`).join('')}
+    </table>` : '<div class="faint">Nothing yet — the lists are covering everyone so far.</div>'}
   </div>`;
 }
 async function addCategory(){

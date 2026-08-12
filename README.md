@@ -92,6 +92,22 @@ Leave the Stripe/Twilio secrets out for now — the app runs fully in simulation
 
 **Service presets.** Provider onboarding offers eight one-tap trade presets (heavy towing, commercial tire, mobile diesel mechanic, trailer & reefer, tanker & pump, fuel delivery, welding & hydraulics, lockout & glass) that check the usual service set, which they then adjust — instead of facing a long checklist cold.
 
+## Fast onboarding: dropdowns instead of typing
+
+Drivers are often filling this out on a phone shoulder, so almost nothing in the truck and trailer forms is free text any more. `server/equipment.js` holds researched lists — makes, models, engines, transmissions, axle configs, tire sizes, wheel types, colors, trailer types, lengths, axles, suspensions, reefer units, door types, hazmat classes — ordered so the common answer sits near the top (295/75R22.5 and 11R22.5 lead the heavy tire list; 225/70R19.5 leads medium; Freightliner leads Class 8 makes).
+
+Every list still ends in **Other…**, which reveals a text box. Whatever they type is saved normally *and* logged, so **Admin → Services** ends with a **"Other" answers** table showing what people typed, how many times, and for which truck class. Anything appearing repeatedly is telling you what to add to the built-in list.
+
+Model choices redraw when the make changes, so picking Kenworth offers T680/W900/T880 rather than the whole industry.
+
+## Heavy, medium and light duty
+
+Duty class is the first question in driver onboarding, and it filters everything under it — a medium-duty truck offers Hino, Isuzu and Mitsubishi Fuso, 19.5" tires and Allison automatics; heavy duty offers Peterbilt, X15s and 22.5" rubber.
+
+Service companies pick which classes they work on in onboarding step 4. Existing companies were widened to heavy + medium automatically (a one-time migration, tracked in `app_flags`) because a too-narrow default silently starves a shop of leads — they can narrow it back any time.
+
+The class is a hard gate enforced in all four places a lead can travel: the SMS/push blast, the browsable lead feed, the purchase endpoint, and the match preview. A heavy-only wrecker service never gets texted about a box truck, and can't buy that lead by any route. Leads carry a **MEDIUM DUTY** / **LIGHT DUTY** badge so a dispatcher sees the size at a glance. If a medium-duty driver posts where every nearby shop is heavy-only, the request screen says so plainly instead of leaving them staring at a spinner.
+
 ## The service catalog (admin-managed)
 
 Categories and the services under them live in the database, not in code. **Admin → Services** is where you run it:

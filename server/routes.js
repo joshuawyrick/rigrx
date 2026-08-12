@@ -10,6 +10,7 @@ const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, haversineMiles, distanceBand } = require('./match');
 const { areaLabel } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
+const EQUIP = require('./equipment');
 
 const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
@@ -125,11 +126,35 @@ router.get('/requests/preview', auth.requireAuth, async (req, res) => {
   const fake = {
     service_key: req.query.service_key, lat, lng,
     licensed_only: req.query.licensed_only === '1',
-    trade_filter: trades
+    trade_filter: trades,
+    duty_class: req.query.duty_class || 'heavy'
   };
   const narrowed = await matchProviders(fake);
   const wide = await matchProviders({ ...fake, licensed_only: false, trade_filter: [] });
   res.json({ matches: narrowed.length, without_filters: wide.length });
+});
+
+/* ---------------- equipment reference lists ---------------- */
+// Powers every dropdown in onboarding so drivers pick instead of type.
+router.get('/equipment', (req, res) => res.json(EQUIP));
+
+// Anything typed into an "Other…" box gets logged so the lists can be improved
+// from real usage. Fire-and-forget: never blocks the person filling the form.
+router.post('/other-entry', auth.requireAuth, async (req, res) => {
+  const field = String(req.body.field || '').slice(0, 40);
+  const value = String(req.body.value || '').trim().slice(0, 80);
+  if (field && value) {
+    await q('INSERT INTO other_entries (field, value, duty_class) VALUES ($1,$2,$3)',
+      [field, value, String(req.body.duty_class || '').slice(0, 20)]).catch(() => {});
+  }
+  res.json({ ok: true });
+});
+
+router.get('/admin/other-entries', auth.requireRole('admin'), async (req, res) => {
+  res.json(await q(`
+    SELECT field, value, duty_class, COUNT(*)::int AS times, MAX(created_at) AS last_seen
+    FROM other_entries GROUP BY field, value, duty_class
+    ORDER BY times DESC, last_seen DESC LIMIT 100`));
 });
 
 /* ---------------- geocoding ---------------- */
@@ -228,7 +253,7 @@ router.delete('/trailers/:id', auth.requireAuth, async (req, res) => {
 
 /* ---------------- provider profile ---------------- */
 router.put('/provider/profile', auth.requireRole('provider'), async (req, res) => {
-  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities, primary_trade } = req.body;
+  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities, primary_trade, duty_classes } = req.body;
   await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [req.user.id]);
   const p = await one(`
     UPDATE providers SET
@@ -236,13 +261,15 @@ router.put('/provider/profile', auth.requireRole('provider'), async (req, res) =
       after_phone = COALESCE($3, after_phone), email = COALESCE($4, email),
       hours = COALESCE($5, hours), services = COALESCE($6, services),
       equipment = COALESCE($7, equipment), verification = COALESCE($8, verification),
-      capabilities = COALESCE($9, capabilities), primary_trade = COALESCE($10, primary_trade)
-    WHERE user_id=$11 RETURNING *`,
+      capabilities = COALESCE($9, capabilities), primary_trade = COALESCE($10, primary_trade),
+      duty_classes = COALESCE($11, duty_classes)
+    WHERE user_id=$12 RETURNING *`,
     [name, dispatch_phone, after_phone, email, hours,
      services ? JSON.stringify(services) : null,
      equipment ? JSON.stringify(equipment) : null,
      verification ? JSON.stringify(verification) : null,
-     capabilities ? JSON.stringify(capabilities) : null, primary_trade ?? null, req.user.id]);
+     capabilities ? JSON.stringify(capabilities) : null, primary_trade ?? null,
+     duty_classes ? JSON.stringify(duty_classes) : null, req.user.id]);
   if (name) await q('UPDATE users SET name=$1 WHERE id=$2', [name, req.user.id]);
   res.json(p);
 });
@@ -320,14 +347,17 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   }
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter, duty_class)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
      JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly,
      tirePos ? JSON.stringify(tirePos) : null, String(b.service_item || '').slice(0, 80),
-     JSON.stringify(Array.isArray(b.trade_filter) ? b.trade_filter.slice(0, 8) : [])]);
+     JSON.stringify(Array.isArray(b.trade_filter) ? b.trade_filter.slice(0, 8) : []),
+     // trust the saved rig over whatever the client sent, falling back to heavy
+     ['heavy','medium','light'].includes(truck.duty) ? truck.duty
+       : (['heavy','medium','light'].includes(b.duty_class) ? b.duty_class : 'heavy')]);
   // remember the driver's preference for next time
   await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
@@ -473,7 +503,10 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
     WHERE r.status='open' AND r.created_at > NOW() - INTERVAL '6 hours'
       AND (r.licensed_only = FALSE OR $1::boolean = TRUE)
       AND (jsonb_array_length(r.trade_filter) = 0 OR r.trade_filter ? $2)
-    ORDER BY r.id DESC LIMIT 50`, [p?.license_verified || false, p?.primary_trade || '']);
+      AND ($3::jsonb ? r.duty_class)
+    ORDER BY r.id DESC LIMIT 50`,
+    [p?.license_verified || false, p?.primary_trade || '',
+     JSON.stringify(p?.duty_classes || ['heavy','medium','light'])]);
   // count what an unverified provider is missing, to nudge them to send paperwork
   const missed = p?.license_verified ? { n: 0 } : await one(`
     SELECT COUNT(*)::int AS n FROM requests
@@ -498,6 +531,7 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
       trailer_type: r.trailer?.type || 'No trailer', loaded: true,
       hazmat: !!(r.trailer && r.trailer.hazmat),
       spec: buildSpec(r),
+      duty_class: r.duty_class || 'heavy',
       service_item: r.service_item || '',
       tire_position: r.tire_position || null,
       driver_rating: r.d_rcount ? +(r.d_rsum / r.d_rcount).toFixed(1) : null,
@@ -530,6 +564,7 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
     hazmat: !!(r.trailer && r.trailer.hazmat),
     hazmat_info: r.trailer?.hazmat ? { class: r.trailer.hzClass, un: r.trailer.un } : null,
     spec: buildSpec(r),
+    duty_class: r.duty_class || 'heavy',
     service_item: r.service_item || '',
     tire_position: r.tire_position || null,
     capability_warning: capabilityWarning(p, r),
@@ -577,6 +612,9 @@ router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => 
   const tf = Array.isArray(r.trade_filter) ? r.trade_filter : [];
   if (tf.length && !tf.includes(p.primary_trade))
     return res.status(403).json({ error: 'This driver asked for a different kind of company' });
+  const dc = Array.isArray(p.duty_classes) ? p.duty_classes : ['heavy','medium','light'];
+  if (!dc.includes(r.duty_class || 'heavy'))
+    return res.status(403).json({ error: 'You have not marked that you service this size of truck' });
 
   const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, req.user.id]);
   if (existing) return res.status(400).json({ error: 'You already own this lead' });

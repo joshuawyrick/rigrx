@@ -53,7 +53,10 @@ async function matchProviders(request, extraMiles = 0) {
   const categoryLabel = cat?.label || null;
   // If the driver asked for licensed companies only, unverified providers are excluded.
   // A trade filter is the driver saying "only companies whose main work is this".
+  // Duty class is a hard gate, not a preference: a heavy-only wrecker service should
+  // never be texted about a box truck, and vice versa.
   const trades = Array.isArray(request.trade_filter) ? request.trade_filter : [];
+  const duty = ['heavy','medium','light'].includes(request.duty_class) ? request.duty_class : 'heavy';
   const rows = await q(`
     SELECT p.user_id, p.name, p.services, p.license_verified, p.primary_trade, u.phone,
            l.lat, l.lng, l.radius_mi
@@ -62,8 +65,9 @@ async function matchProviders(request, extraMiles = 0) {
     JOIN provider_locations l ON l.user_id = p.user_id
     WHERE p.approved = TRUE
       AND ($1::boolean = FALSE OR p.license_verified = TRUE)
-      AND ($2::int = 0 OR p.primary_trade = ANY($3::text[]))`,
-    [!!request.licensed_only, trades.length, trades]);
+      AND ($2::int = 0 OR p.primary_trade = ANY($3::text[]))
+      AND p.duty_classes ? $4`,
+    [!!request.licensed_only, trades.length, trades, duty]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
     if (!offersCategory(r.services, request.service_key, categoryLabel)) continue;

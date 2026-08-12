@@ -211,6 +211,34 @@ CREATE TABLE IF NOT EXISTS provider_trades (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS primary_trade TEXT NOT NULL DEFAULT '';
+-- Which truck sizes a company will work on: ["heavy","medium","light"]
+-- Which truck sizes a company works on. Defaults to heavy + medium because most
+-- commercial shops take both, and a too-narrow default silently starves them of leads.
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS duty_classes JSONB NOT NULL DEFAULT '["heavy","medium"]';
+ALTER TABLE providers ALTER COLUMN duty_classes SET DEFAULT '["heavy","medium"]';
+-- One-time widening for companies created before medium duty existed. Runs once,
+-- tracked in app_flags, so a company that later chooses heavy-only stays heavy-only.
+CREATE TABLE IF NOT EXISTS app_flags (key TEXT PRIMARY KEY, set_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM app_flags WHERE key = 'duty_widen_v1') THEN
+    UPDATE providers SET duty_classes = '["heavy","medium"]' WHERE duty_classes = '["heavy"]';
+    INSERT INTO app_flags (key) VALUES ('duty_widen_v1');
+  END IF;
+END $$;
+-- Duty class of the rig on a request, so a box truck never gets a Class 8 wrecker
+ALTER TABLE requests  ADD COLUMN IF NOT EXISTS duty_class TEXT NOT NULL DEFAULT 'heavy';
+
+-- Whatever people type into an "Other…" box, so the dropdown lists can be
+-- improved from real usage instead of guesswork.
+CREATE TABLE IF NOT EXISTS other_entries (
+  id         SERIAL PRIMARY KEY,
+  field      TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  duty_class TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_other_field ON other_entries(field);
 -- Driver may narrow a request to companies whose main work is one of these
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS trade_filter JSONB NOT NULL DEFAULT '[]';
 
