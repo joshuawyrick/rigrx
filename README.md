@@ -23,7 +23,18 @@ Built with Node.js + Express + PostgreSQL + WebSockets. No build step — deploy
 
 - **Driver** — free. Signs in with their phone, saves trucks/trailers to "My Garage," requests help, compares up to 4 responders, chats, picks one, rates them.
 - **Service company** — builds a profile (multiple locations each with its own radius, full service checklist + custom services, equipment, license/COI uploads), waits for your approval, then gets lead alerts and buys leads.
-- **Admin (you)** — the phone number in the `ADMIN_PHONE` secret gets the admin panel on sign-in: provider approval queue, lead pricing, refunds, custom-service approvals, marketplace metrics.
+- **Admin (you)** — the phone number in the `ADMIN_PHONE` secret gets the admin panel on sign-in: provider review & approval, license verification, lead pricing, refunds, custom-service approvals, marketplace metrics.
+
+## Approval vs. license verification (two separate switches)
+
+| Switch | What it controls | Who can be it |
+|---|---|---|
+| **Approved** | Can see leads and buy them at all | Any vetted company, licensed or not |
+| **License verified** | Also receives requests from drivers who chose "licensed companies only" | Companies whose license/insurance you've checked |
+
+Click any company in **Providers** to open its full dossier: contact info, every coverage location with radius, all services offered, custom service requests, equipment, license number, clickable COI and W-9 documents, lead-spend history, driver reviews, and your own private notes. A banner lists any onboarding fields they left blank. Approve and verify independently from that page.
+
+Drivers pick **All approved companies** (default) or **Licensed companies only** on every request, and the choice is remembered. If a licensed-only request finds nobody, the driver gets a one-tap "send to all approved companies instead" button so they're never stranded without responders.
 
 ---
 
