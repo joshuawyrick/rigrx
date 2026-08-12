@@ -1274,9 +1274,9 @@ async function vAPurchases(){
     ${[['','All time'],['24h','Last 24h']].map(([v,l])=>
       `<span class="chip ${w===v?'sel':''}" onclick="nav('a-purchases',{adminSalesWindow:'${v}'})">${l}</span>`).join('')}
   </div>
-  ${rows.map(x=>`<div class="card">
+  ${rows.map(x=>`<div class="card click" onclick="nav('a-request',{adminRequestId:${x.request_id}})">
     <div class="row">
-      <div style="cursor:pointer" onclick="nav('a-request',{adminRequestId:${x.request_id}})">
+      <div>
         <b class="mini k">${fmt$(x.amount_cents)} — ${esc(x.provider_name)}${x.won?' <span class="pill solid" style="font-size:9px">WON THE JOB</span>':''}</b>
         <div class="faint">Request #${x.request_id} · ${esc(x.service_label)} · ${esc(x.area_label)} · from ${esc(x.driver_name || 'driver')} · slot ${x.slot}${x.premium?' (premium)':''} · ${timeAgo(x.created_at)}</div>
       </div>
