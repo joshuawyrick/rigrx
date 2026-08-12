@@ -19,6 +19,7 @@ Built with Node.js + Express + PostgreSQL + WebSockets. No build step — deploy
 | Seed data | `server/seed.js` | Demo driver, approved demo provider, pending provider for your admin queue |
 | Front-end | `public/` | The full app — sign-in, driver + company onboarding, dashboards, chat, admin panel |
 | Geocoding | `server/geo.js` | Turns GPS into a readable area ("Near Buttonwillow, CA") with no API key or cost |
+| Service catalog | `server/catalog.js` | Admin-managed categories & services; seeds itself once, then belongs to the admin |
 
 ## The three roles
 
@@ -90,6 +91,20 @@ Leave the Stripe/Twilio secrets out for now — the app runs fully in simulation
 **Provider capability flags.** Seven yes/no answers (works at scales, hazmat placarded loads, loaded trailers, cargo tanks, rotator, aluminum welding, tire inventory) shown on their public profile and in your admin dossier. When a lead needs a capability a provider has not claimed, they get a non-blocking heads-up rather than being filtered out.
 
 **Service presets.** Provider onboarding offers eight one-tap trade presets (heavy towing, commercial tire, mobile diesel mechanic, trailer & reefer, tanker & pump, fuel delivery, welding & hydraulics, lockout & glass) that check the usual service set, which they then adjust — instead of facing a long checklist cold.
+
+## The service catalog (admin-managed)
+
+Categories and the services under them live in the database, not in code. **Admin → Services** is where you run it:
+
+- **Add a category** — name, one-line blurb, icon, lead price and premium price, and whether drivers see it on the request screen
+- **Add services under it** — these become the checkboxes every service company can select, and the optional "what kind?" refinement drivers can tap
+- **Rename freely** — provider selections are stored against a hidden key, so renaming a category never orphans anyone's setup
+- **Turn off, don't delete** — switching a category off removes it from new requests while past requests keep their labels and revenue reports stay intact
+- **Promote requests** — approving something from **Requested Services** folds that provider's suggestion into a category you choose, so every company can then offer it
+
+One catalog feeds all three sides: the driver's request buttons (filtered to driver-visible, in your sort order), the provider's capability checklist, and the matching between them. A provider matches a request when they have at least one service checked under that category. Selections saved before the catalog existed still match, so nothing was lost in the migration.
+
+Practical note: a brand-new category reaches nobody until service companies check something under it. Add categories as demand appears — the Requested Services queue is providers telling you exactly what is missing.
 
 ## Staged location disclosure
 

@@ -35,8 +35,13 @@ const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
   activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null,
-  leadId: null, simulatedPayments: true
+  leadId: null, simulatedPayments: true, catalog: []
 };
+async function loadCatalog(){
+  try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
+}
+const catByKey = k => (S.catalog || []).find(c => c.key === k) || null;
+const svcIconFor = k => catByKey(k)?.icon || 'box';
 async function loadMe(){
   const d = await api('GET', '/me');
   S.me = d.user; S.provider = d.provider || null;
@@ -289,17 +294,7 @@ async function saveDSetup3(){
   nav('d-home');
 }
 /* ---------------- driver app ---------------- */
-const SERVICES = [
-  ['towing','truck','Towing','Heavy & medium duty, winch-out','Heavy Towing & Recovery'],
-  ['tires','tire','Tires','Replace or repair on the shoulder','Tires'],
-  ['wontstart','zap',"Won't Start",'Jump, batteries, starter',"Won't Start"],
-  ['mechanic','wrench','Engine / Mechanical','Diagnostics, derate, air leaks','Mobile Mechanic'],
-  ['trailer','trailer','Trailer / Reefer','Reefer down, brakes, lights','Trailer / Reefer'],
-  ['fuel','fuel','Fuel / DEF','Out of fuel, gelled, DEF','Fuel / DEF Delivery'],
-  ['lockout','key','Lockout','Keys locked in the cab','Lockout'],
-  ['other','box','Other','Welding, glass, hydraulics…','Other Services']
-];
-const svcIcon = key => (SERVICES.find(s=>s[0]===key) || ['','box'])[1];
+const svcIcon = key => svcIconFor(key);
 
 async function vDHome(){
   const mine = await api('GET', '/requests/mine');
@@ -332,18 +327,22 @@ function startRequest(){
   nav('d-request');
 }
 function vDRequest(){
+  const cats = (S.catalog || []).filter(c => c.driver_visible);
   return `
   <h2 class="scr">What do you need?</h2>
   <p class="scrsub">Step 1 of 4 — pick a service</p>
   <div class="grid2s">
-    ${SERVICES.map(s=>`<div class="svc" onclick="pickSvc('${s[0]}')">
-      <div class="em">${ic(s[1],26)}</div><div class="nm">${s[2]}</div><div class="ds">${s[3]}</div></div>`).join('')}
+    ${cats.map(c=>`<div class="svc" onclick="pickSvc('${c.key}')">
+      <div class="em">${ic(c.icon,26)}</div><div class="nm">${esc(c.label)}</div><div class="ds">${esc(c.blurb)}</div></div>`).join('')
+      || '<div class="card"><span class="muted">No services available yet</span></div>'}
   </div>`;
 }
 function pickSvc(key){
-  const s = SERVICES.find(x=>x[0]===key);
+  const c = catByKey(key);
+  if (!c) return toast('That service is unavailable');
   if (!S.draft) startRequest();
-  S.draft.service_key = key; S.draft.service_label = s[4]; S.draft.icon = s[1];
+  S.draft.service_key = key; S.draft.service_label = c.label; S.draft.icon = c.icon;
+  S.draft.service_item = '';
   nav('d-details');
 }
 function vDDetails(){
@@ -363,6 +362,7 @@ function vDDetails(){
     ${r.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${esc(x.data.type)} #${esc(x.data.num)}${x.data.hazmat?' ⚠':''}</span>`).join('')}
     <span class="chip ${r.length?'':'sel'}" data-id="" onclick="togOne(this)">Bobtail / none</span>
   </div>
+  ${subPicker(d)}
   ${d.service_key === 'tires' ? tirePicker(d) : ''}
   <label class="f">Situation</label>
   <div class="chips" id="rq-situation">
@@ -382,6 +382,17 @@ function vDDetails(){
   <div style="height:16px"></div>
   <button class="btn" onclick="saveDetails()">Continue ${ic('arrowR',15)}</button>`;
 }
+/* ---- optional refinement: which kind of work, from the admin catalog ---- */
+function subPicker(d){
+  const items = (catByKey(d.service_key)?.items) || [];
+  if (!items.length) return '';
+  return `
+  <label class="f">What kind? <span style="text-transform:none; letter-spacing:0; font-weight:500">(optional — helps them bring the right parts)</span></label>
+  <div class="chips" id="rq-subitem">
+    ${items.map(i=>`<span class="chip ${i.label===d.service_item?'sel':''}" onclick="togOne(this)">${esc(i.label)}</span>`).join('')}
+  </div>`;
+}
+
 /* ---- which tire failed: axle → side → inner/outer, no diagrams ---- */
 const TIRE_AXLES = ['Steer axle','Drive axle 1','Drive axle 2','Drive axle 3',
                     'Trailer axle 1','Trailer axle 2','Trailer axle 3'];
@@ -438,6 +449,7 @@ function saveDetails(){
   d.situation = selOf('rq-situation');
   d.can_move = $('rq-move').querySelector('.chip.sel')?.dataset.v || 'no';
   d.description = qv('rq-desc');
+  d.service_item = $('rq-subitem')?.querySelector('.chip.sel')?.textContent.trim() || '';
   if (d.service_key === 'tires') {
     const tp = readTirePicker();
     if (!tp || !tp.axle) return toast('Pick which tire so they bring the right one');
@@ -521,6 +533,7 @@ function vDReview(){
     <div class="mini listline">
       <span class="muted">Truck</span> &nbsp;${t.make ? esc(`Unit ${t.unit} · ${t.year} ${t.make} ${t.model} · ${t.engine}`) : 'Not specified'}<br>
       <span class="muted">Trailer</span> &nbsp;${r.type ? esc(r.type) + (r.hazmat ? ` · <span style="color:var(--red);font-weight:700">Hazmat UN ${esc(r.un)}</span>` : '') : 'Bobtail / none'}<br>
+      ${d.service_item ? `<span class="muted">Type</span> &nbsp;<b class="k">${esc(d.service_item)}</b><br>` : ''}
       ${d.tire_position ? `<span class="muted">Tire</span> &nbsp;<b class="k">${esc([d.tire_position.axle, d.tire_position.side, d.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${d.tire_position.problem ? ' — '+esc(d.tire_position.problem) : ''}<br>` : ''}
       <span class="muted">Where</span> &nbsp;${esc(d.area_label)}<br>
       <span class="muted">Photos</span> &nbsp;${d.photos.length || 'none'}
@@ -781,21 +794,17 @@ async function sendQuote(){
   toast('Quote sent'); render();
 }
 /* ---------------- provider onboarding ---------------- */
-const SVC_CATALOG = {
-  'Towing & Recovery':['Heavy tow','Medium tow','Winch-out','Rotator / rollover','Accident recovery','Load transfer','Decking / undecking'],
-  'Tires':['Roadside tire replacement','Tire repair / section','Mobile tire service','Air-up / valve stems'],
-  'Mobile Mechanic':['Jump start','Batteries / starters','Engine diagnostics','DPF / regen','Air system & brakes','Coolant / overheating','Electrical & lighting','Wheel seals / hubs','Driveline','Mobile welding','Hydraulics / wet kits','A/C & HVAC','APU repair'],
-  'Trailer / Reefer':['Reefer repair','Trailer brakes & air','Lights / ABS / 7-way','Landing gear','Doors / roll-up','Liftgate','Tanker pump / wet-line','Chassis repair'],
-  'Fuel & Fluids':['Diesel delivery','DEF delivery','Gelled fuel rescue','Coolant / oil delivery'],
-  'Other':['Lockout','Mobile glass','On-site PM service','DOT inspection help','Load securement']
-};
 const CITIES = [
   ['Bakersfield, CA',35.3733,-119.0187],['Fresno, CA',36.7378,-119.7871],['Visalia, CA',36.3302,-119.2921],
   ['Buttonwillow, CA',35.4021,-119.4718],['Lost Hills, CA',35.6164,-119.6943],['Mojave, CA',35.0525,-118.1739],
   ['Barstow, CA',34.8958,-117.0173],['Lancaster, CA',34.6868,-118.1542],['Santa Clarita, CA',34.3917,-118.5426],
   ['Los Angeles, CA',34.0549,-118.2426],['Stockton, CA',37.9577,-121.2908],['Sacramento, CA',38.5816,-121.4944]
 ];
-const catKey = c => 'svc-' + c.replace(/[^a-z]/gi,'');
+// Preset labels were written against the original catalog names
+const PRESET_LEGACY = {
+  'Towing & Recovery':'towing', 'Tires':'tires', 'Mobile Mechanic':'mechanic',
+  'Trailer / Reefer':'trailer', 'Fuel & Fluids':'fuel', 'Other':'other'
+};
 
 /* One tap instead of two hundred checkboxes — the usual service set per trade. */
 const PRESETS = {
@@ -832,8 +841,10 @@ const PRESETS = {
 function applyPreset(name){
   const preset = PRESETS[name];
   if (!preset) return;
-  for (const [cat, items] of Object.entries(preset)) {
-    const group = $(catKey(cat));
+  for (const [catLabel, items] of Object.entries(preset)) {
+    const cat = (S.catalog||[]).find(c => c.label === catLabel) ||
+                (S.catalog||[]).find(c => PRESET_LEGACY[catLabel] === c.key);
+    const group = cat ? $('svc-' + cat.key) : null;
     if (!group) continue;
     [...group.querySelectorAll('.chip')].forEach(chip => {
       if (items.includes(chip.textContent.trim())) chip.classList.add('sel');
@@ -931,11 +942,12 @@ function vPSetup3(){
     </div>
     <div class="faint" style="margin-top:8px">This checks the usual services for that trade — you can add or remove any of them below.</div>
   </div>
-  ${Object.entries(SVC_CATALOG).map(([cat, items])=>`
+  ${(S.catalog||[]).map(c=>`
   <div class="card">
-    <span class="sec">${cat}</span>
-    <div class="chips" style="margin-top:9px" id="${catKey(cat)}">
-      ${items.map(s=>`<span class="chip ${(services[cat]||[]).includes(s)?'sel':''}" onclick="tog(this)">${s}</span>`).join('')}
+    <span class="sec">${esc(c.label)}</span>
+    <div class="chips" style="margin-top:9px" id="svc-${c.key}">
+      ${c.items.map(i=>`<span class="chip ${selectedFor(services, c).includes(i.label)?'sel':''}" onclick="tog(this)">${esc(i.label)}</span>`).join('')
+        || '<span class="faint">No services listed under this category yet</span>'}
     </div>
   </div>`).join('')}
   <div class="card" style="border-style:dashed">
@@ -957,9 +969,13 @@ async function addCustomSvc(){
   await api('POST', '/provider/custom-service', { name });
   await loadMe(); toast(`"${name}" added — pending RIGRX approval`); render();
 }
+// Selections may still be stored under an old category label; read either.
+function selectedFor(services, cat){
+  return (services?.[cat.key] || services?.[cat.label] || []);
+}
 async function savePSetup3(){
   const services = {};
-  for (const cat of Object.keys(SVC_CATALOG)) services[cat] = selOf(catKey(cat));
+  for (const c of (S.catalog||[])) services[c.key] = selOf('svc-' + c.key);
   if (!Object.values(services).some(v=>v.length)) return toast('Select at least one service');
   await api('PUT', '/provider/profile', { services });
   await loadMe();
@@ -1214,8 +1230,8 @@ async function vPSettings(){
   </div>
   <div class="card">
     <div class="row"><span class="sec">Services offered (${svcCount})</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup3')">${ic('edit',13)} Edit</span></div>
-    ${Object.entries(p.services||{}).filter(([,v])=>v?.length).map(([cat,items])=>`
-      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(cat)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No services selected yet</div>'}
+    ${Object.entries(p.services||{}).filter(([,v])=>v?.length).map(([k,items])=>`
+      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(catByKey(k)?.label || k)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No services selected yet</div>'}
   </div>
   </div><div>
   <div class="card">
@@ -1475,18 +1491,23 @@ async function adminRefund(id){
 async function vACustom(){
   const rows = await api('GET', '/admin/custom-services');
   return `
-  <h2 class="scr">Custom Services</h2>
-  <p class="scrsub">Provider-suggested services — approve to grow the catalog</p>
+  <h2 class="scr">Requested Services</h2>
+  <p class="scrsub">Services companies asked for that you don't offer yet. Approving adds it to the category you pick, so every company can then select it.</p>
   ${rows.map(c=>`<div class="card"><div class="row">
     <div><b class="mini k">"${esc(c.name)}"</b><div class="faint">by ${esc(c.provider_name)} · ${esc(c.status)}</div></div>
-    ${c.status==='pending' ? `<span style="display:inline-flex;gap:6px">
+    ${c.status==='pending' ? `<span style="display:inline-flex;gap:6px; align-items:center; flex-wrap:wrap">
+      <select id="cs-cat-${c.id}" style="width:auto; padding:8px">
+        ${(S.catalog||[]).map(cat=>`<option value="${cat.id}">Add under ${esc(cat.label)}</option>`).join('')}
+      </select>
       <button class="btn" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'approve')">Approve</button>
       <button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'reject')">Reject</button></span>`
     : `<span class="pill ${c.status==='approved'?'solid':'gray'}">${esc(c.status.toUpperCase())}</span>`}
   </div></div>`).join('') || '<div class="card"><span class="muted">Nothing pending</span></div>'}`;
 }
 async function adminCustom(id, action){
-  await api('POST', `/admin/custom-services/${id}/${action}`);
+  const catId = action === 'approve' ? Number(qv('cs-cat-' + id)) : null;
+  await api('POST', `/admin/custom-services/${id}/${action}`, catId ? { category_id: catId } : {});
+  if (action === 'approve') { await loadCatalog(); toast('Approved and added to the catalog for everyone'); }
   render();
 }
 async function vARequests(){
@@ -1587,6 +1608,111 @@ async function vARequest(){
   </div></div>`;
 }
 
+
+/* ---------------- admin: service catalog ---------------- */
+const ICON_CHOICES = ['truck','tire','zap','wrench','trailer','fuel','key','box','chart','tag','pin','check','warn','camera','card','clock','bell','mobile','user','folder'];
+
+async function vACatalog(){
+  const cats = await api('GET', '/catalog?all=1');
+  S.catalogAdmin = cats;
+  return `
+  <h2 class="scr">Services</h2>
+  <p class="scrsub">Everything here drives the app: what drivers can request, what companies can offer, and how the two get matched.</p>
+
+  <div class="card" style="border-style:dashed">
+    <span class="sec">Add a category</span>
+    <div class="grid2" style="margin-top:10px">
+      <div><label class="f" style="margin-top:0">Name</label><input type="text" id="nc-label" placeholder="Auto Glass Repair"></div>
+      <div><label class="f" style="margin-top:0">One-line description</label><input type="text" id="nc-blurb" placeholder="Windshields, chips, mirrors"></div>
+    </div>
+    <div class="grid2">
+      <div><label class="f">Lead price $</label><input type="text" id="nc-std" value="25"></div>
+      <div><label class="f">Premium 4th slot $</label><input type="text" id="nc-prem" value="50"></div>
+    </div>
+    <label class="f">Icon</label>
+    <div class="chips" id="nc-icon">
+      ${ICON_CHOICES.map((n,i)=>`<span class="chip ${i===7?'sel':''}" data-icon="${n}" onclick="togOne(this)">${ic(n,16)}</span>`).join('')}
+    </div>
+    <label class="f">Show on the driver's request screen?</label>
+    <div class="chips" id="nc-visible">
+      <span class="chip sel" onclick="togOne(this)">Yes</span><span class="chip" onclick="togOne(this)">Providers only</span>
+    </div>
+    <div style="height:12px"></div>
+    <button class="btn" onclick="addCategory()">${ic('plus',16)} Add category</button>
+  </div>
+
+  ${cats.map(c=>`
+  <div class="card ${c.active?'':'.'}" style="${c.active?'':'opacity:.6'}">
+    <div class="row" style="flex-wrap:wrap; gap:8px">
+      <b class="mini k" style="display:inline-flex; align-items:center; gap:8px; font-size:14px">${ic(c.icon,17)} ${esc(c.label)}</b>
+      <span style="display:inline-flex; gap:6px; align-items:center">
+        ${c.driver_visible ? '<span class="pill red">DRIVERS SEE IT</span>' : '<span class="pill gray">PROVIDERS ONLY</span>'}
+        <span class="pill dark">${c.standard_cents!=null ? fmt$(c.standard_cents) : 'no price'}${c.premium_cents!=null ? ' / '+fmt$(c.premium_cents) : ''}</span>
+        ${c.active ? '' : '<span class="pill gray">OFF</span>'}
+      </span>
+    </div>
+    <div class="faint" style="margin-top:4px">${esc(c.blurb || 'no description')} · key <code style="font-size:11px">${esc(c.key)}</code></div>
+
+    <div class="chips" style="margin-top:10px">
+      ${c.items.map(i=>`<span class="chip sel">${esc(i.label)} <span style="cursor:pointer; opacity:.6" onclick="removeItem(${i.id})">✕</span></span>`).join('')
+        || '<span class="faint">No services under this category yet — add one below</span>'}
+    </div>
+    <div class="row" style="gap:8px; margin-top:10px">
+      <input type="text" id="ni-${c.id}" placeholder="Add a service, e.g. Windshield replacement" style="flex:1">
+      <button class="btn dark" style="width:auto; padding:11px 15px; font-size:12.5px" onclick="addItem(${c.id})">Add</button>
+    </div>
+
+    <div class="divider"></div>
+    <div class="row" style="flex-wrap:wrap; gap:8px">
+      <span style="display:inline-flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <span class="faint">Name</span><input type="text" id="ec-label-${c.id}" value="${esc(c.label)}" style="width:150px; padding:8px">
+        <span class="faint">$</span><input type="text" id="ec-std-${c.id}" value="${c.standard_cents!=null?c.standard_cents/100:25}" style="width:56px; padding:8px">
+        <span class="faint">prem $</span><input type="text" id="ec-prem-${c.id}" value="${c.premium_cents!=null?c.premium_cents/100:50}" style="width:56px; padding:8px">
+        <button class="btn dark" style="width:auto; padding:9px 13px; font-size:12px" onclick="saveCategory(${c.id})">Save</button>
+      </span>
+      <span style="display:inline-flex; gap:6px">
+        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'driver_visible',${!c.driver_visible})">${c.driver_visible?'Hide from drivers':'Show to drivers'}</button>
+        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'active',${!c.active})">${c.active?'Turn off':'Turn on'}</button>
+      </span>
+    </div>
+  </div>`).join('')}
+  <div class="card" style="background:var(--soft)">
+    <div class="mini" style="line-height:1.55">${ic('warn',14)} Categories get turned off rather than deleted, so past requests keep their labels and your revenue reports stay intact. A new category reaches nobody until service companies check something under it — so add them as demand shows up.</div>
+  </div>`;
+}
+async function addCategory(){
+  const label = qv('nc-label').trim();
+  if (!label) return toast('Give the category a name');
+  await api('POST', '/admin/catalog', {
+    label, blurb: qv('nc-blurb'),
+    standard: qv('nc-std'), premium: qv('nc-prem'),
+    icon: $('nc-icon').querySelector('.chip.sel')?.dataset.icon || 'box',
+    driver_visible: $('nc-visible').querySelector('.chip.sel')?.textContent.trim() === 'Yes'
+  });
+  await loadCatalog();
+  toast('"' + label + '" added — now add the services under it');
+  render();
+}
+async function saveCategory(id){
+  await api('PUT', '/admin/catalog/' + id, {
+    label: qv('ec-label-'+id), standard: qv('ec-std-'+id), premium: qv('ec-prem-'+id) });
+  await loadCatalog(); toast('Saved'); render();
+}
+async function toggleCat(id, field, value){
+  await api('PUT', '/admin/catalog/' + id, { [field]: value });
+  await loadCatalog(); render();
+}
+async function addItem(catId){
+  const label = qv('ni-'+catId).trim();
+  if (!label) return;
+  await api('POST', `/admin/catalog/${catId}/items`, { label });
+  await loadCatalog(); toast('Added'); render();
+}
+async function removeItem(itemId){
+  await api('DELETE', '/admin/catalog/items/' + itemId);
+  await loadCatalog(); render();
+}
+
 /* ---------------- shell & render ---------------- */
 const VIEWS = {
   signin: vSignin, code: vCode,
@@ -1598,7 +1724,7 @@ const VIEWS = {
   'p-feed': vPFeed, 'p-lead': vPLead, 'p-myleads': vPMyLeads, 'p-chat': ()=>chatView('p-threads'), 'p-threads': vThreads,
   'p-stats': vPStats, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
-  'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-requests': vARequests, 'a-request': vARequest,
+  'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-catalog': vACatalog, 'a-requests': vARequests, 'a-request': vARequest,
   'a-drivers': vADrivers, 'a-driver': vADriver
 };
 const AUTH_LAYOUT = new Set(['signin','code','d-setup1','d-setup2','d-setup3','p-setup1','p-setup2','p-setup3','p-setup4','p-setup5','loading']);
@@ -1617,9 +1743,10 @@ const NAVS = {
     {ico:'home', label:'Overview', v:'a-home'},
     {ico:'check', label:'Providers', v:'a-providers', also:['a-provider']},
     {ico:'user', label:'Drivers', v:'a-drivers', also:['a-driver']},
+    {ico:'wrench', label:'Services', v:'a-catalog'},
     {ico:'tag', label:'Pricing', v:'a-pricing'},
     {ico:'card', label:'Sales', v:'a-purchases'},
-    {ico:'plus', label:'Services', v:'a-custom'},
+    {ico:'plus', label:'Requested', v:'a-custom'},
     {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']}]
 };
 let renderSeq = 0;
@@ -1661,6 +1788,7 @@ async function render(){
 
 /* ---------------- boot ---------------- */
 (async function boot(){
+  await loadCatalog();
   try { await loadMe(); } catch(e){}
   if (S.me) connectWS();
   nav(homeFor());

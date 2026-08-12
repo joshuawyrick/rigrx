@@ -9,6 +9,7 @@ const { chargeLead, refund, SIMULATED } = require('./payments');
 const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, haversineMiles, distanceBand } = require('./match');
 const { areaLabel } = require('./geo');
+const { getCatalog, ensurePricing, slugify } = require('./catalog');
 
 const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
@@ -22,6 +23,67 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 8 * 1024 * 1024 } });
 router.post('/upload', auth.requireAuth, upload.single('file'), (req, res) => {
   res.json({ url: '/uploads/' + req.file.filename });
+});
+
+/* ---------------- service catalog ---------------- */
+// Everyone reads the catalog; only the admin writes it.
+router.get('/catalog', async (req, res) => {
+  const all = req.query.all === '1' && req.user?.role === 'admin';
+  res.json(await getCatalog({ activeOnly: !all }));
+});
+
+router.post('/admin/catalog', auth.requireRole('admin'), async (req, res) => {
+  const label = String(req.body.label || '').trim();
+  if (!label) return res.status(400).json({ error: 'Name required' });
+  const std = Math.max(0, Math.round((parseFloat(req.body.standard) || 25) * 100));
+  const prem = Math.max(0, Math.round((parseFloat(req.body.premium) || (std / 100) * 2) * 100));
+  let key = slugify(label);
+  if (await one('SELECT id FROM service_categories WHERE key=$1', [key])) key += Date.now().toString().slice(-4);
+  const max = await one('SELECT COALESCE(MAX(sort_order),0)::int AS m FROM service_categories WHERE key <> $1', ['other']);
+  const cat = await one(`
+    INSERT INTO service_categories (key, label, icon, blurb, driver_visible, sort_order)
+    VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [key, label, req.body.icon || 'box', String(req.body.blurb || '').slice(0, 80),
+     req.body.driver_visible !== false, max.m + 10]);
+  await ensurePricing(key, label, std, prem);
+  res.json(cat);
+});
+
+router.put('/admin/catalog/:id', auth.requireRole('admin'), async (req, res) => {
+  const b = req.body;
+  const cat = await one(`
+    UPDATE service_categories SET
+      label = COALESCE($1, label), icon = COALESCE($2, icon), blurb = COALESCE($3, blurb),
+      driver_visible = COALESCE($4, driver_visible), active = COALESCE($5, active),
+      sort_order = COALESCE($6, sort_order)
+    WHERE id=$7 RETURNING *`,
+    [b.label ?? null, b.icon ?? null, b.blurb ?? null,
+     typeof b.driver_visible === 'boolean' ? b.driver_visible : null,
+     typeof b.active === 'boolean' ? b.active : null,
+     Number.isFinite(b.sort_order) ? b.sort_order : null, req.params.id]);
+  if (!cat) return res.status(404).json({ error: 'Not found' });
+  if (b.label || b.standard != null || b.premium != null) {
+    const price = await one('SELECT * FROM pricing WHERE service_key=$1', [cat.key]);
+    const std = b.standard != null ? Math.round(parseFloat(b.standard) * 100) : (price?.standard_cents ?? 2500);
+    const prem = b.premium != null ? Math.round(parseFloat(b.premium) * 100) : (price?.premium_cents ?? 5000);
+    await ensurePricing(cat.key, cat.label, std, prem);
+  }
+  res.json(cat);
+});
+
+router.post('/admin/catalog/:id/items', auth.requireRole('admin'), async (req, res) => {
+  const label = String(req.body.label || '').trim().slice(0, 80);
+  if (!label) return res.status(400).json({ error: 'Name required' });
+  const max = await one('SELECT COALESCE(MAX(sort_order),0)::int AS m FROM service_items WHERE category_id=$1', [req.params.id]);
+  const item = await one(
+    'INSERT INTO service_items (category_id, label, sort_order) VALUES ($1,$2,$3) RETURNING *',
+    [req.params.id, label, max.m + 10]);
+  res.json(item);
+});
+
+router.delete('/admin/catalog/items/:id', auth.requireRole('admin'), async (req, res) => {
+  await q('UPDATE service_items SET active=FALSE WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
 });
 
 /* ---------------- geocoding ---------------- */
@@ -212,13 +274,13 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   }
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
      JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly,
-     tirePos ? JSON.stringify(tirePos) : null]);
+     tirePos ? JSON.stringify(tirePos) : null, String(b.service_item || '').slice(0, 80)]);
   // remember the driver's preference for next time
   await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
@@ -387,6 +449,7 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
       trailer_type: r.trailer?.type || 'No trailer', loaded: true,
       hazmat: !!(r.trailer && r.trailer.hazmat),
       spec: buildSpec(r),
+      service_item: r.service_item || '',
       tire_position: r.tire_position || null,
       driver_rating: r.d_rcount ? +(r.d_rsum / r.d_rcount).toFixed(1) : null,
       slots, price_cents: slots.premiumOpen ? r.premium_cents : r.standard_cents,
@@ -418,6 +481,7 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
     hazmat: !!(r.trailer && r.trailer.hazmat),
     hazmat_info: r.trailer?.hazmat ? { class: r.trailer.hzClass, un: r.trailer.un } : null,
     spec: buildSpec(r),
+    service_item: r.service_item || '',
     tire_position: r.tire_position || null,
     capability_warning: capabilityWarning(p, r),
     driver_rating: driver.rating_count ? +(driver.rating_sum / driver.rating_count).toFixed(1) : null,
@@ -710,7 +774,19 @@ router.get('/admin/custom-services', auth.requireRole('admin'), async (req, res)
 });
 router.post('/admin/custom-services/:id/:action', auth.requireRole('admin'), async (req, res) => {
   const status = req.params.action === 'approve' ? 'approved' : 'rejected';
-  await q('UPDATE custom_services SET status=$1 WHERE id=$2', [status, req.params.id]);
+  const cs = await one('UPDATE custom_services SET status=$1 WHERE id=$2 RETURNING *', [status, req.params.id]);
+  // Approving folds the provider's suggestion into the real catalog so every
+  // company can pick it from then on — otherwise "approved" means nothing.
+  if (status === 'approved' && req.body.category_id) {
+    const dupe = await one('SELECT id FROM service_items WHERE category_id=$1 AND lower(label)=lower($2)',
+      [req.body.category_id, cs.name]);
+    if (!dupe) {
+      const max = await one('SELECT COALESCE(MAX(sort_order),0)::int AS m FROM service_items WHERE category_id=$1', [req.body.category_id]);
+      await q('INSERT INTO service_items (category_id, label, sort_order) VALUES ($1,$2,$3)',
+        [req.body.category_id, cs.name, max.m + 10]);
+    }
+    await q('UPDATE custom_services SET promoted_category=$1 WHERE id=$2', [req.body.category_id, req.params.id]);
+  }
   res.json({ ok: true });
 });
 

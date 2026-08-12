@@ -67,7 +67,8 @@ wss.on('connection', async (socket, req) => {
 });
 
 const PORT = process.env.PORT || 3000;
-migrate().then(() => {
+const { seedIfEmpty } = require('./catalog');
+migrate().then(seedIfEmpty).then(() => {
   server.listen(PORT, () => console.log(`RIGRX running on http://localhost:${PORT}`));
 }).catch(e => {
   console.error('Database migration failed. Is DATABASE_URL set correctly?', e);

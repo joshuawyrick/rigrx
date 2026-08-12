@@ -1,18 +1,31 @@
 // ============ Lead matching engine ============
-const { q } = require('./db');
+const { q, one } = require('./db');
 const { sms, wsPush } = require('./notify');
 
-// service_key -> provider service category that must be non-empty to match
-const KEY_TO_CATEGORY = {
-  towing:    'Towing & Recovery',
-  tires:     'Tires',
-  wontstart: 'Mobile Mechanic',
-  mechanic:  'Mobile Mechanic',
-  trailer:   'Trailer / Reefer',
-  fuel:      'Fuel & Fluids',
-  lockout:   'Other',
-  other:     'Other'
+// Legacy labels from before the catalog was admin-managed. Provider selections
+// saved under an old label still count, so nobody loses their setup.
+const LEGACY_LABELS = {
+  towing:    ['Towing & Recovery'],
+  tires:     ['Tires'],
+  wontstart: ['Mobile Mechanic'],
+  mechanic:  ['Mobile Mechanic'],
+  trailer:   ['Trailer / Reefer'],
+  fuel:      ['Fuel & Fluids'],
+  lockout:   ['Other'],
+  other:     ['Other']
 };
+
+// A provider matches a request's category if they have at least one service
+// checked under it — looked up by catalog KEY first, then by any legacy label.
+function offersCategory(services, serviceKey, categoryLabel) {
+  if (!services) return false;
+  if ((services[serviceKey] || []).length) return true;                 // new: keyed by catalog key
+  if (categoryLabel && (services[categoryLabel] || []).length) return true; // current label
+  for (const legacy of (LEGACY_LABELS[serviceKey] || [])) {
+    if ((services[legacy] || []).length) return true;
+  }
+  return false;
+}
 
 function haversineMiles(lat1, lng1, lat2, lng2) {
   const R = 3958.8; // earth radius, miles
@@ -36,7 +49,8 @@ function distanceBand(mi) {
 // Find approved providers whose ANY location radius covers the point and who offer the category.
 // extraMiles widens the search when nobody matched (radius auto-expansion).
 async function matchProviders(request, extraMiles = 0) {
-  const category = KEY_TO_CATEGORY[request.service_key] || 'Other';
+  const cat = await one('SELECT label FROM service_categories WHERE key=$1', [request.service_key]);
+  const categoryLabel = cat?.label || null;
   // If the driver asked for licensed companies only, unverified providers are excluded.
   const rows = await q(`
     SELECT p.user_id, p.name, p.services, p.license_verified, u.phone,
@@ -49,8 +63,7 @@ async function matchProviders(request, extraMiles = 0) {
     [!!request.licensed_only]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
-    const services = r.services || {};
-    if (!(services[category] || []).length) continue;
+    if (!offersCategory(r.services, request.service_key, categoryLabel)) continue;
     const d = haversineMiles(request.lat, request.lng, r.lat, r.lng);
     if (d <= r.radius_mi + extraMiles) {
       if (!seen.has(r.user_id) || d < seen.get(r.user_id).distance) {
@@ -72,4 +85,4 @@ async function notifyProviders(request, matches, price) {
   }
 }
 
-module.exports = { matchProviders, notifyProviders, haversineMiles, distanceBand, KEY_TO_CATEGORY };
+module.exports = { matchProviders, notifyProviders, haversineMiles, distanceBand, offersCategory };

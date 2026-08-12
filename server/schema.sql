@@ -171,6 +171,37 @@ ALTER TABLE requests  ADD COLUMN IF NOT EXISTS tire_position JSONB;
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE users     ADD COLUMN IF NOT EXISTS prefer_licensed_only BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- ============ Admin-managed service catalog ============
+-- One catalog drives three things: the driver's request buttons, the provider's
+-- capability checklist, and the matching between them. Categories are switched
+-- off rather than deleted so historical requests keep their labels.
+CREATE TABLE IF NOT EXISTS service_categories (
+  id            SERIAL PRIMARY KEY,
+  key           TEXT UNIQUE NOT NULL,        -- stable slug; provider selections key off this so names can change
+  label         TEXT NOT NULL,
+  icon          TEXT NOT NULL DEFAULT 'box',
+  blurb         TEXT NOT NULL DEFAULT '',    -- the small line under the driver's button
+  driver_visible BOOLEAN NOT NULL DEFAULT TRUE,
+  active        BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order    INTEGER NOT NULL DEFAULT 100,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS service_items (
+  id          SERIAL PRIMARY KEY,
+  category_id INTEGER NOT NULL REFERENCES service_categories(id) ON DELETE CASCADE,
+  label       TEXT NOT NULL,
+  active      BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order  INTEGER NOT NULL DEFAULT 100,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_items_category ON service_items(category_id);
+
+-- The driver's optional "what kind?" refinement
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS service_item TEXT NOT NULL DEFAULT '';
+-- Which category an approved custom service was folded into
+ALTER TABLE custom_services ADD COLUMN IF NOT EXISTS promoted_category INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_purchases_request ON purchases(request_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(request_id, provider_id);
