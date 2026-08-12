@@ -1640,7 +1640,7 @@ async function render(){
   root.innerHTML = `
   <div class="shell">
     <div class="sidebar">
-      <div class="slogo">RIG<span>RX</span></div>
+      <div class="slogo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
       ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,19)} ${t.label}</button>`).join('')}
       <div class="spacer"></div>
       <button onclick="signOut()">${ic('out',18)} Sign out</button>
@@ -1648,7 +1648,7 @@ async function render(){
     </div>
     <div class="main">
       <div class="topbar">
-        <div class="logo">RIG<span>RX</span></div>
+        <div class="logo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
         <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])} &nbsp;·&nbsp; <a onclick="signOut()">Sign out</a></div>
       </div>
       <div class="content${S.me.role==='driver' ? '' : ' wide'}">${html}</div>
