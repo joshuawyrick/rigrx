@@ -81,6 +81,16 @@ Leave the Stripe/Twilio secrets out for now — the app runs fully in simulation
 4. Window A: choose the company → mark complete → leave a rating.
 5. Sign in with your `ADMIN_PHONE` → approve the pending "Valley Tire Rescue," tweak pricing, see revenue.
 
+## Lead quality features
+
+**Exact tire position.** A tire request asks which axle (steer / drive 1-3 / trailer 1-3), which side, and inside vs outside vs super single — no diagrams, just taps. Steer axles skip the inside/outside question automatically. The tire SIZE is then pulled from the saved rig (steer size for steer axles, drive size for drive axles, trailer size for trailer axles), so the driver never types it and the provider knows what rubber to load before leaving the shop.
+
+**Richer masked leads.** Providers see engine, transmission, axle config, tire sizes, wheel type, trailer length/suspension, reefer unit and liftgate BEFORE paying. None of it identifies the driver, so the paywall still holds — but a provider can decide what to bring based on real equipment detail.
+
+**Provider capability flags.** Seven yes/no answers (works at scales, hazmat placarded loads, loaded trailers, cargo tanks, rotator, aluminum welding, tire inventory) shown on their public profile and in your admin dossier. When a lead needs a capability a provider has not claimed, they get a non-blocking heads-up rather than being filtered out.
+
+**Service presets.** Provider onboarding offers eight one-tap trade presets (heavy towing, commercial tire, mobile diesel mechanic, trailer & reefer, tanker & pump, fuel delivery, welding & hydraulics, lockout & glass) that check the usual service set, which they then adjust — instead of facing a long checklist cold.
+
 ## The admin dashboard
 
 Every number on the Overview page is clickable and opens the data behind it:

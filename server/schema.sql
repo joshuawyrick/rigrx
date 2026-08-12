@@ -165,6 +165,10 @@ ALTER TABLE providers ADD COLUMN IF NOT EXISTS license_verified BOOLEAN NOT NULL
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS license_verified_at TIMESTAMPTZ;
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS admin_notes TEXT NOT NULL DEFAULT '';
 ALTER TABLE requests  ADD COLUMN IF NOT EXISTS licensed_only BOOLEAN NOT NULL DEFAULT FALSE;
+-- Exact failed tire: {axle, side, position, size, wheel, problem}
+ALTER TABLE requests  ADD COLUMN IF NOT EXISTS tire_position JSONB;
+-- Provider yes/no capability flags used for matching precision and lead warnings
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE users     ADD COLUMN IF NOT EXISTS prefer_licensed_only BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);

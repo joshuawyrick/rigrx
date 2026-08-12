@@ -120,19 +120,21 @@ router.delete('/trailers/:id', auth.requireAuth, async (req, res) => {
 
 /* ---------------- provider profile ---------------- */
 router.put('/provider/profile', auth.requireRole('provider'), async (req, res) => {
-  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification } = req.body;
+  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities } = req.body;
   await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [req.user.id]);
   const p = await one(`
     UPDATE providers SET
       name = COALESCE($1, name), dispatch_phone = COALESCE($2, dispatch_phone),
       after_phone = COALESCE($3, after_phone), email = COALESCE($4, email),
       hours = COALESCE($5, hours), services = COALESCE($6, services),
-      equipment = COALESCE($7, equipment), verification = COALESCE($8, verification)
-    WHERE user_id=$9 RETURNING *`,
+      equipment = COALESCE($7, equipment), verification = COALESCE($8, verification),
+      capabilities = COALESCE($9, capabilities)
+    WHERE user_id=$10 RETURNING *`,
     [name, dispatch_phone, after_phone, email, hours,
      services ? JSON.stringify(services) : null,
      equipment ? JSON.stringify(equipment) : null,
-     verification ? JSON.stringify(verification) : null, req.user.id]);
+     verification ? JSON.stringify(verification) : null,
+     capabilities ? JSON.stringify(capabilities) : null, req.user.id]);
   if (name) await q('UPDATE users SET name=$1 WHERE id=$2', [name, req.user.id]);
   res.json(p);
 });
@@ -160,7 +162,7 @@ router.post('/provider/custom-service', auth.requireRole('provider'), async (req
 router.get('/providers/:id/public', async (req, res) => {
   const p = await one(`
     SELECT p.user_id, p.name, p.hours, p.equipment, p.badges, p.jobs_won,
-           p.rating_sum, p.rating_count, p.license_verified, p.services
+           p.rating_sum, p.rating_count, p.license_verified, p.services, p.capabilities
     FROM providers p WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const locations = await q('SELECT label, radius_mi FROM provider_locations WHERE user_id=$1', [req.params.id]);
@@ -194,14 +196,29 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   if (b.trailer_id) trailer = (await one('SELECT data FROM trailers WHERE id=$1 AND user_id=$2', [b.trailer_id, req.user.id]))?.data || {};
 
   const licensedOnly = !!b.licensed_only;
+  // Tire requests carry the exact failed position; the size is derived from the saved rig
+  // so the provider knows what rubber to load before leaving the shop.
+  let tirePos = null;
+  if (b.tire_position && b.tire_position.axle) {
+    const tp = b.tire_position;
+    const isTrailer = /trailer/i.test(tp.axle);
+    const isSteer = /steer/i.test(tp.axle);
+    tirePos = {
+      axle: tp.axle, side: tp.side || '', position: tp.position || '',
+      problem: tp.problem || '',
+      size: isTrailer ? (trailer.tires || '') : (isSteer ? (truck.steer || '') : (truck.drive || '')),
+      wheel: isTrailer ? '' : (truck.wheels || '')
+    };
+  }
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
-     JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly]);
+     JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly,
+     tirePos ? JSON.stringify(tirePos) : null]);
   // remember the driver's preference for next time
   await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
@@ -293,6 +310,35 @@ router.post('/requests/:id/cancel', auth.requireAuth, async (req, res) => {
 });
 
 /* ---------------- leads (provider side) ---------------- */
+// Equipment detail that is safe to show BEFORE purchase — it describes the rig,
+// never the driver. This is what lets a provider load the right parts up front.
+function buildSpec(r) {
+  const t = r.truck || {}, tr = r.trailer || {};
+  const out = [];
+  if (t.engine) out.push({ k: 'Engine', v: t.engine });
+  if (t.trans) out.push({ k: 'Transmission', v: t.trans });
+  if (t.axles) out.push({ k: 'Axles', v: t.axles });
+  if (t.steer || t.drive) out.push({ k: 'Truck tires', v: [t.steer, t.drive].filter(Boolean).join(' steer / ') + (t.drive ? ' drive' : '') });
+  if (t.wheels) out.push({ k: 'Wheels', v: t.wheels });
+  if (t.extras && t.extras.length) out.push({ k: 'Extras', v: t.extras.join(' · ') });
+  if (tr.len || tr.axles) out.push({ k: 'Trailer', v: [tr.len, tr.axles].filter(Boolean).join(' · ') });
+  if (tr.tires) out.push({ k: 'Trailer tires', v: tr.tires });
+  if (tr.reefer) out.push({ k: 'Reefer unit', v: tr.reefer });
+  if (tr.liftgate) out.push({ k: 'Liftgate', v: tr.liftgate });
+  return out;
+}
+
+// Non-blocking heads-up when a lead needs a capability the provider has not claimed.
+function capabilityWarning(provider, r) {
+  const c = (provider && provider.capabilities) || {};
+  const notes = [];
+  if (r.trailer && r.trailer.hazmat && !c.hazmat) notes.push('this load is placarded hazmat');
+  if (/tanker/i.test(r.trailer?.type || '') && !c.tanker) notes.push('this is a cargo tank / tanker');
+  if ((r.situation || []).some(s => /scale|inspection/i.test(s)) && !c.scale) notes.push('this is at a scale or inspection facility');
+  if (!notes.length) return null;
+  return 'Heads up — ' + notes.join(' and ') + ', and you have not marked that capability in your settings.';
+}
+
 async function providerOf(req) {
   return await one('SELECT * FROM providers WHERE user_id=$1', [req.user.id]);
 }
@@ -337,9 +383,11 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
       id: r.id, service_key: r.service_key, service_label: r.service_label,
       area_label: r.area_label, band: distanceBand(best),
       created_at: r.created_at, situation: r.situation, can_move: r.can_move,
-      truck_class: r.truck?.make ? `${r.truck.year || ''} ${r.truck.make}`.trim() : 'Class 8 tractor',
+      truck_class: r.truck?.make ? `${r.truck.year || ''} ${r.truck.make} ${r.truck.model || ''}`.trim() : 'Class 8 tractor',
       trailer_type: r.trailer?.type || 'No trailer', loaded: true,
       hazmat: !!(r.trailer && r.trailer.hazmat),
+      spec: buildSpec(r),
+      tire_position: r.tire_position || null,
       driver_rating: r.d_rcount ? +(r.d_rsum / r.d_rcount).toFixed(1) : null,
       slots, price_cents: slots.premiumOpen ? r.premium_cents : r.standard_cents,
       premium: slots.premiumOpen, purchased: !!mine
@@ -354,6 +402,7 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
 });
 
 router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
+  const p = await providerOf(req);
   const r = await one(`SELECT r.*, pr.standard_cents, pr.premium_cents FROM requests r
     JOIN pricing pr ON pr.service_key=r.service_key WHERE r.id=$1`, [req.params.id]);
   if (!r) return res.status(404).json({ error: 'Not found' });
@@ -368,6 +417,9 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
     trailer_type: r.trailer?.type || 'No trailer',
     hazmat: !!(r.trailer && r.trailer.hazmat),
     hazmat_info: r.trailer?.hazmat ? { class: r.trailer.hzClass, un: r.trailer.un } : null,
+    spec: buildSpec(r),
+    tire_position: r.tire_position || null,
+    capability_warning: capabilityWarning(p, r),
     driver_rating: driver.rating_count ? +(driver.rating_sum / driver.rating_count).toFixed(1) : null,
     slots, price_cents: slots.premiumOpen ? r.premium_cents : r.standard_cents, premium: slots.premiumOpen,
     purchased: !!mine, selected_provider: r.selected_provider

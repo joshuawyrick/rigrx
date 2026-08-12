@@ -363,6 +363,7 @@ function vDDetails(){
     ${r.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${esc(x.data.type)} #${esc(x.data.num)}${x.data.hazmat?' ⚠':''}</span>`).join('')}
     <span class="chip ${r.length?'':'sel'}" data-id="" onclick="togOne(this)">Bobtail / none</span>
   </div>
+  ${d.service_key === 'tires' ? tirePicker(d) : ''}
   <label class="f">Situation</label>
   <div class="chips" id="rq-situation">
     ${['On highway shoulder','Truck stop / lot','On ramp','Blocking traffic'].map(x=>`<span class="chip ${d.situation.includes(x)?'sel':''}" onclick="tog(this)">${x}</span>`).join('')}
@@ -381,6 +382,48 @@ function vDDetails(){
   <div style="height:16px"></div>
   <button class="btn" onclick="saveDetails()">Continue ${ic('arrowR',15)}</button>`;
 }
+/* ---- which tire failed: axle → side → inner/outer, no diagrams ---- */
+const TIRE_AXLES = ['Steer axle','Drive axle 1','Drive axle 2','Drive axle 3',
+                    'Trailer axle 1','Trailer axle 2','Trailer axle 3'];
+function tirePicker(d){
+  const tp = d.tire_position || {};
+  const isSteer = /steer/i.test(tp.axle || '');
+  return `
+  <label class="f">Which tire?</label>
+  <div class="chips" id="rq-tire-axle">
+    ${TIRE_AXLES.map(a=>`<span class="chip ${a===tp.axle?'sel':''}" onclick="pickAxle(this)">${a}</span>`).join('')}
+  </div>
+  <label class="f">Which side?</label>
+  <div class="chips" id="rq-tire-side">
+    ${['Driver side','Passenger side'].map(x=>`<span class="chip ${x===tp.side?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+  </div>
+  ${isSteer ? '' : `
+  <label class="f">Inside or outside?</label>
+  <div class="chips" id="rq-tire-pos">
+    ${['Outside','Inside','Super single (only one tire)'].map(x=>`<span class="chip ${x===tp.position?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+  </div>`}
+  <label class="f">What happened to it?</label>
+  <div class="chips" id="rq-tire-problem">
+    ${['Flat','Blowout','Low air','Sidewall damage','Tread separation','Wheel damage','Not sure'].map(x=>`<span class="chip ${x===tp.problem?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+  </div>
+  <div class="faint" style="margin-top:8px">${ic('check',12)} The tire size comes from your saved rig automatically, so they bring the right one.</div>`;
+}
+function pickAxle(el){
+  togOne(el);
+  S.draft.tire_position = readTirePicker();
+  render();   // steer axles have no inner/outer, so the options change
+}
+function readTirePicker(){
+  if (!$('rq-tire-axle')) return S.draft.tire_position || null;
+  const axle = $('rq-tire-axle').querySelector('.chip.sel')?.textContent.trim() || '';
+  if (!axle) return null;
+  return {
+    axle,
+    side: $('rq-tire-side')?.querySelector('.chip.sel')?.textContent.trim() || '',
+    position: /steer/i.test(axle) ? 'Single' : ($('rq-tire-pos')?.querySelector('.chip.sel')?.textContent.trim() || ''),
+    problem: $('rq-tire-problem')?.querySelector('.chip.sel')?.textContent.trim() || ''
+  };
+}
 async function uploadPhoto(input){
   if (!input.files[0]) return;
   const fd = new FormData(); fd.append('file', input.files[0]);
@@ -395,6 +438,11 @@ function saveDetails(){
   d.situation = selOf('rq-situation');
   d.can_move = $('rq-move').querySelector('.chip.sel')?.dataset.v || 'no';
   d.description = qv('rq-desc');
+  if (d.service_key === 'tires') {
+    const tp = readTirePicker();
+    if (!tp || !tp.axle) return toast('Pick which tire so they bring the right one');
+    d.tire_position = tp;
+  }
   nav('d-location');
 }
 function vDLocation(){
@@ -473,6 +521,7 @@ function vDReview(){
     <div class="mini listline">
       <span class="muted">Truck</span> &nbsp;${t.make ? esc(`Unit ${t.unit} · ${t.year} ${t.make} ${t.model} · ${t.engine}`) : 'Not specified'}<br>
       <span class="muted">Trailer</span> &nbsp;${r.type ? esc(r.type) + (r.hazmat ? ` · <span style="color:var(--red);font-weight:700">Hazmat UN ${esc(r.un)}</span>` : '') : 'Bobtail / none'}<br>
+      ${d.tire_position ? `<span class="muted">Tire</span> &nbsp;<b class="k">${esc([d.tire_position.axle, d.tire_position.side, d.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${d.tire_position.problem ? ' — '+esc(d.tire_position.problem) : ''}<br>` : ''}
       <span class="muted">Where</span> &nbsp;${esc(d.area_label)}<br>
       <span class="muted">Photos</span> &nbsp;${d.photos.length || 'none'}
     </div>
@@ -573,6 +622,7 @@ async function vDPubProfile(){
     <div class="chips" style="justify-content:center; margin-top:12px">
       ${p.license_verified ? `<span class="pill dark">${ic('check',11)} License verified</span>` : '<span class="pill gray">License not verified</span>'}
       ${(p.badges||[]).map(b=>`<span class="pill dark">${esc(b)}</span>`).join('')}
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill gray">${esc(label)}</span>`).join('')}
       <span class="pill gray">${esc(p.hours)}</span>
     </div>
   </div>
@@ -719,6 +769,62 @@ const CITIES = [
 ];
 const catKey = c => 'svc-' + c.replace(/[^a-z]/gi,'');
 
+/* One tap instead of two hundred checkboxes — the usual service set per trade. */
+const PRESETS = {
+  'Heavy towing & recovery': {
+    'Towing & Recovery': ['Heavy tow','Medium tow','Winch-out','Rotator / rollover','Accident recovery','Load transfer','Decking / undecking'],
+    'Other': ['Load securement']
+  },
+  'Commercial tire service': {
+    'Tires': ['Roadside tire replacement','Tire repair / section','Mobile tire service','Air-up / valve stems']
+  },
+  'Mobile diesel mechanic': {
+    'Mobile Mechanic': ['Jump start','Batteries / starters','Engine diagnostics','DPF / regen','Air system & brakes','Coolant / overheating','Electrical & lighting','Wheel seals / hubs','Driveline','A/C & HVAC','APU repair'],
+    'Other': ['On-site PM service','DOT inspection help']
+  },
+  'Trailer & reefer repair': {
+    'Trailer / Reefer': ['Reefer repair','Trailer brakes & air','Lights / ABS / 7-way','Landing gear','Doors / roll-up','Liftgate','Chassis repair'],
+    'Mobile Mechanic': ['Electrical & lighting']
+  },
+  'Tanker & pump service': {
+    'Trailer / Reefer': ['Tanker pump / wet-line','Trailer brakes & air'],
+    'Mobile Mechanic': ['Hydraulics / wet kits','Mobile welding']
+  },
+  'Fuel & fluid delivery': {
+    'Fuel & Fluids': ['Diesel delivery','DEF delivery','Gelled fuel rescue','Coolant / oil delivery']
+  },
+  'Mobile welding & hydraulics': {
+    'Mobile Mechanic': ['Mobile welding','Hydraulics / wet kits'],
+    'Trailer / Reefer': ['Chassis repair','Landing gear']
+  },
+  'Lockout & glass': {
+    'Other': ['Lockout','Mobile glass']
+  }
+};
+function applyPreset(name){
+  const preset = PRESETS[name];
+  if (!preset) return;
+  for (const [cat, items] of Object.entries(preset)) {
+    const group = $(catKey(cat));
+    if (!group) continue;
+    [...group.querySelectorAll('.chip')].forEach(chip => {
+      if (items.includes(chip.textContent.trim())) chip.classList.add('sel');
+    });
+  }
+  toast(name + ' services checked — adjust anything below');
+}
+
+/* Yes/no flags that make matching precise without a long form. */
+const CAPS = [
+  ['scale',   'Works at weigh stations & inspection facilities'],
+  ['hazmat',  'Will service placarded hazmat loads'],
+  ['loaded',  'Will service a loaded trailer'],
+  ['tanker',  'Services cargo tanks / tankers'],
+  ['rotator', 'Has a rotator or heavy wrecker'],
+  ['aluminum','Aluminum welding capable'],
+  ['tires_stocked', 'Carries tire inventory on the truck']
+];
+
 function vPSetup1(){
   const p = S.provider || {};
   return authShell(`
@@ -789,7 +895,14 @@ function vPSetup3(){
   <button class="back" onclick="nav('p-setup2')">${ic('chevL',15)} Back</button>
   ${progress(3,5)}
   <h2 class="scr">What services do you offer?</h2>
-  <p class="scrsub">Step 3 of 5 — check everything you can actually run. More boxes = more leads; your rating keeps it honest.</p>
+  <p class="scrsub">Step 3 of 5 — start with what kind of shop you are, then adjust. More boxes = more leads; your rating keeps it honest.</p>
+  <div class="card" style="border-style:dashed">
+    <span class="sec">Quick start — tap the one that fits you</span>
+    <div class="chips" style="margin-top:10px">
+      ${Object.keys(PRESETS).map(k=>`<span class="chip" onclick="applyPreset('${k.replace(/'/g,"")}')">${k}</span>`).join('')}
+    </div>
+    <div class="faint" style="margin-top:8px">This checks the usual services for that trade — you can add or remove any of them below.</div>
+  </div>
   ${Object.entries(SVC_CATALOG).map(([cat, items])=>`
   <div class="card">
     <span class="sec">${cat}</span>
@@ -826,6 +939,7 @@ async function savePSetup3(){
 }
 function vPSetup4(){
   const e = S.provider?.equipment || {};
+  const c = S.provider?.capabilities || {};
   return authShell(`
   <button class="back" onclick="nav('p-setup3')">${ic('chevL',15)} Back</button>
   ${progress(4,5)}
@@ -843,11 +957,22 @@ function vPSetup4(){
     <div><label class="f">Tire trucks</label><input type="text" id="eq-tire" value="${esc(e.tiretrucks)}"></div>
     <div><label class="f">Fuel trucks</label><input type="text" id="eq-fuel" value="${esc(e.fueltrucks)}"></div>
   </div>
-  <div style="height:16px"></div>
+  <div class="card" style="margin-top:18px">
+    <span class="sec">What can you take on?</span>
+    <div class="faint" style="margin:6px 0 10px">Seven quick answers that send you the right leads and keep the wrong ones away.</div>
+    <div class="chips" id="p-caps">
+      ${CAPS.map(([k,label])=>`<span class="chip ${c[k]?'sel':''}" data-k="${k}" onclick="tog(this)">${label}</span>`).join('')}
+    </div>
+  </div>
+  <div style="height:8px"></div>
   <button class="btn" onclick="savePSetup4()">Continue ${ic('arrowR',15)}</button>`);
 }
 async function savePSetup4(){
-  await api('PUT', '/provider/profile', { equipment: {
+  const caps = {};
+  [...($('p-caps')?.querySelectorAll('.chip') || [])].forEach(ch => {
+    if (ch.classList.contains('sel')) caps[ch.dataset.k] = true;
+  });
+  await api('PUT', '/provider/profile', { capabilities: caps, equipment: {
     wreckers: qv('eq-wreckers'), rotator: qv('eq-rotator'), service: qv('eq-service'),
     landoll: qv('eq-landoll'), tiretrucks: qv('eq-tire'), fueltrucks: qv('eq-fuel') } });
   await loadMe();
@@ -919,6 +1044,8 @@ function leadCard(l){
   return `<div class="lead" onclick="nav('p-lead',{leadId:${l.id}})">
     <div class="row"><span class="ty">${ic(svcIcon(l.service_key))} ${esc(l.service_label)}</span><span class="pill ${l.slots.total===0?'solid':'gray'}">${timeAgo(l.created_at)}</span></div>
     <div class="mini" style="margin:8px 0 3px">${esc(l.truck_class)} + <b class="k">${esc(l.trailer_type)}${l.hazmat ? ' (hazmat)' : ''}</b> · ${l.can_move==='no' ? "can't move" : 'can move'}</div>
+    ${l.tire_position ? `<div class="mini" style="margin:3px 0"><b class="k" style="color:var(--red)">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${l.tire_position.size ? ' — '+esc(l.tire_position.size) : ''}${l.tire_position.problem ? ' · '+esc(l.tire_position.problem) : ''}</div>` : ''}
+    ${(l.spec||[]).length ? `<div class="faint" style="margin:3px 0">${l.spec.slice(0,3).map(x=>esc(x.k)+': '+esc(x.v)).join(' · ')}</div>` : ''}
     <div class="muted mini">${ic('pin',12)} ${esc(l.area_label)} · <b class="k">${l.band} from you</b></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<l.slots.standard?'f':''}"></i>`).join('')}<i class="${l.slots.total>3?'p':''}" style="${l.premium||l.slots.total>3?'':'opacity:.5'}"></i></div>
     <div class="row" style="margin-top:10px">
@@ -947,6 +1074,22 @@ async function vPLead(){
       <span class="muted">Driver rating</span> &nbsp;${l.driver_rating ? star5(Math.round(l.driver_rating)) + ' ' + l.driver_rating + ' as rated by providers' : 'New driver'}
     </div>
   </div>
+  ${l.tire_position ? `<div class="card" style="border-color:var(--red)">
+    <span class="sec">${ic('tire',13)} The failed tire</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Position</span> &nbsp;<b class="k">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b><br>
+      <span class="muted">Size</span> &nbsp;<b class="k">${esc(l.tire_position.size || 'not on file')}</b><br>
+      ${l.tire_position.wheel ? `<span class="muted">Wheel</span> &nbsp;${esc(l.tire_position.wheel)}<br>` : ''}
+      <span class="muted">Problem</span> &nbsp;${esc(l.tire_position.problem || '—')}
+    </div>
+  </div>` : ''}
+  ${(l.spec||[]).length ? `<div class="card">
+    <span class="sec">Equipment on this rig</span>
+    <div class="mini listline" style="margin-top:6px">
+      ${l.spec.map(x=>`<span class="muted">${esc(x.k)}</span> &nbsp;${esc(x.v)}`).join('<br>')}
+    </div>
+  </div>` : ''}
+  ${l.capability_warning ? `<div class="card alert"><div class="mini">${ic('warn',14)} ${esc(l.capability_warning)}</div></div>` : ''}
   ${full ? `
   <div class="card">
     <div class="row"><b class="k">${esc(full.driver_name)}</b><b style="color:var(--red);display:inline-flex;align-items:center;gap:5px">${ic('phone',14)} ${esc(full.driver_phone)}</b></div>
@@ -1043,8 +1186,11 @@ async function vPSettings(){
   </div>
   </div><div>
   <div class="card">
-    <div class="row"><span class="sec">Equipment</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup4')">${ic('edit',13)} Edit</span></div>
+    <div class="row"><span class="sec">Equipment & capabilities</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup4')">${ic('edit',13)} Edit</span></div>
     <div class="mini" style="margin-top:7px; line-height:1.8">${['wreckers','rotator','service','landoll'].map(k=>p.equipment?.[k] ? esc(p.equipment[k]) + ' ' + k : '').filter(Boolean).join(' · ') || '—'}</div>
+    <div class="chips" style="margin-top:10px">
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${ic('check',10)} ${esc(label)}</span>`).join('') || '<span class="faint">No capability flags set — you may be missing matching leads</span>'}
+    </div>
   </div>
   <div class="card">
     <div class="row"><span class="sec">Verification</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup5')">${ic('edit',13)} Edit</span></div>
@@ -1195,6 +1341,12 @@ async function vAProvider(){
   <div class="card">
     <span class="sec">Equipment</span>
     <div class="mini" style="margin-top:6px; line-height:1.8">${Object.entries(p.equipment||{}).filter(([,x])=>x).map(([k,x])=>`${esc(k)}: <b class="k">${esc(x)}</b>`).join(' · ') || '—'}</div>
+  </div>
+  <div class="card">
+    <span class="sec">Capabilities claimed</span>
+    <div class="chips" style="margin-top:8px">
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${esc(label)}</span>`).join('') || '<span class="faint">None set</span>'}
+    </div>
   </div>
   </div><div>
 
