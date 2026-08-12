@@ -572,6 +572,9 @@ async function vDActive(){
       <button class="btn" onclick="openToAll(${r.id})">Send to all approved companies instead</button>
     </div>` : ''}
   ${filled === 0 && !(r.licensed_only && r.notified_count === 0) ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
+  ${filled > 0 && r.status === 'open' ? `<div class="card alert">
+    <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">Message them before you choose.</b> Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.</div>
+  </div>` : ''}
   ${d.responders.map(x=>`
     <div class="resp">
       <div class="row"><div>
@@ -580,9 +583,9 @@ async function vDActive(){
         ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} LICENSED</span>` : ''}</div>
       </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
       ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
-      <div class="row" style="margin-top:11px; gap:8px">
-        <button class="btn ghost" style="padding:11px" onclick="nav('d-chat',{chatKey:{r:${r.id},p:${x.provider_id}}})">${ic('chat',15)} Chat</button>
-        ${r.status==='open' ? `<button class="btn" style="padding:11px" onclick="chooseProvider(${r.id},${x.provider_id})">${ic('check',15)} Choose</button>` : ''}
+      <div class="actions">
+        <button class="btn chat" onclick="nav('d-chat',{chatKey:{r:${r.id},p:${x.provider_id}}})">${ic('chat',15)} Chat first</button>
+        ${r.status==='open' ? `<button class="btn choose" onclick="askChoose(${r.id},${x.provider_id},'${esc(x.name).replace(/'/g,"")}')">${ic('check',15)} Choose</button>` : ''}
       </div>
     </div>`).join('')}
   ${r.status==='selected' ? `
@@ -596,9 +599,31 @@ async function openToAll(reqId){
   toast(`${res.notified} more compan${res.notified===1?'y':'ies'} notified`);
   render();
 }
-async function chooseProvider(reqId, provId){
+function askChoose(reqId, provId, name){
+  const el = document.createElement('div');
+  el.className = 'modalwrap';
+  el.id = 'confirmWrap';
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Choose this company?</h3>
+      <p>They get your exact location and mile marker, and they're on their way.</p>
+      <div class="who"><b class="k">${esc(name)}</b></div>
+      <p>${ic('warn',13)} This can't be undone. The other companies will be told they didn't get the job, and your request closes to new responders.</p>
+      <p>If you haven't asked for an ETA and price yet, chat with them first.</p>
+      <div class="acts">
+        <button class="btn ghost" onclick="closeConfirm()">Not yet</button>
+        <button class="btn" onclick="confirmChoose(${reqId},${provId})">Yes, choose them</button>
+      </div>
+    </div>`;
+  el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  document.body.appendChild(el);
+}
+function closeConfirm(){ $('confirmWrap')?.remove(); }
+async function confirmChoose(reqId, provId){
+  closeConfirm();
   await api('POST', `/requests/${reqId}/select`, { provider_id: provId });
-  toast('Provider chosen — the others were notified'); render();
+  toast('Chosen — they have your location now, the others were told');
+  render();
 }
 async function completeRequest(reqId){
   await api('POST', `/requests/${reqId}/complete`);
@@ -721,6 +746,9 @@ async function chatView(backView){
   <button class="back" onclick="nav('${backView}')">${ic('chevL',15)} Back</button>
   <div class="card" style="margin-top:8px"><div class="row"><b class="k">Request #${r} · ${esc(d.request.service_label)}</b>
     <span class="pill ${d.request.status==='open'?'red':'dark'}">${esc(d.request.status.toUpperCase())}</span></div></div>
+  ${S.me.role !== 'provider' && d.request.status === 'open' ? `<div class="card alert" style="margin-top:10px">
+    <div class="mini" style="line-height:1.5">${ic('lock',13)} Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.</div>
+  </div>` : ''}
   <div class="chatbox" id="chatlog">
     ${d.messages.map(m=>`
       <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
@@ -1095,13 +1123,18 @@ async function vPLead(){
     <div class="row"><b class="k">${esc(full.driver_name)}</b><b style="color:var(--red);display:inline-flex;align-items:center;gap:5px">${ic('phone',14)} ${esc(full.driver_phone)}</b></div>
     <div class="divider"></div>
     <div class="mini listline">
-      <span class="muted">Exact spot</span> &nbsp;${esc(full.landmark || (full.lat.toFixed(4)+', '+full.lng.toFixed(4)))}<br>
-      <span class="muted">GPS</span> &nbsp;<a href="https://maps.google.com/?q=${full.lat},${full.lng}" target="_blank">${full.lat.toFixed(4)}, ${full.lng.toFixed(4)} — open in Maps ›</a><br>
+      ${full.won ? `
+        <span class="muted">Exact spot</span> &nbsp;<b class="k">${esc(full.landmark || (full.lat.toFixed(4)+', '+full.lng.toFixed(4)))}</b><br>
+        <span class="muted">GPS</span> &nbsp;<a href="https://maps.google.com/?q=${full.lat},${full.lng}" target="_blank">${full.lat.toFixed(4)}, ${full.lng.toFixed(4)} — open in Maps ›</a><br>`
+      : `
+        <span class="muted">Distance</span> &nbsp;<b class="k">${full.distance_mi != null ? full.distance_mi + ' mi · about ' + full.eta_min + ' min' : 'add a location in Settings'}</b><br>
+        <span class="muted">Exact spot</span> &nbsp;<span style="color:var(--muted)">${ic('lock',12)} unlocks if the driver picks you</span><br>`}
       <span class="muted">Problem</span> &nbsp;"${esc(full.description || '—')}"<br>
       <span class="muted">Truck</span> &nbsp;${esc([full.truck.year, full.truck.make, full.truck.model, full.truck.engine, full.truck.color].filter(Boolean).join(' · ') || '—')}<br>
       <span class="muted">Trailer</span> &nbsp;${esc([full.trailer.type, full.trailer.len].filter(Boolean).join(' · ') || '—')}<br>
       <span class="muted">Photos</span> &nbsp;${(full.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">${ic('camera',13)} view</a>`).join(' · ') || 'none'}
     </div>
+    ${full.won ? '' : `<div class="divider"></div><div class="faint" style="line-height:1.5">${ic('lock',12)} You have the driver and the distance so you can quote accurately. The exact pin and mile marker unlock the moment they choose you — that keeps four trucks from rolling to the same breakdown.</div>`}
   </div>` : `
   <div class="card">
     <span class="sec">${ic('lock',13)} Unlocks when you buy</span>

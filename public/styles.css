@@ -179,3 +179,22 @@
   .svc .ds{font-size:10.5px; color:var(--muted); margin-top:3px; line-height:1.35;}
   .grid2s{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
   @media(min-width:960px){ .grid2s{grid-template-columns:repeat(4,1fr);} }
+
+  /* confirmation dialog — choosing a provider is final, so it gets a real stop */
+  .modalwrap{position:fixed; inset:0; background:rgba(29,29,31,.45); backdrop-filter:blur(3px);
+    display:flex; align-items:center; justify-content:center; padding:20px; z-index:200;}
+  .modal{background:#fff; border-radius:18px; padding:24px; max-width:420px; width:100%;
+    box-shadow:0 24px 60px rgba(0,0,0,.3); animation:pop .16s ease;}
+  @keyframes pop{from{opacity:0; transform:scale(.96);} to{opacity:1; transform:none;}}
+  .modal h3{font-size:19px; font-weight:800; letter-spacing:-.2px; margin-bottom:8px;}
+  .modal p{font-size:14px; color:var(--muted); line-height:1.55; margin:0 0 6px;}
+  .modal .who{background:var(--soft); border-radius:12px; padding:12px 14px; margin:14px 0;}
+  .modal .acts{display:flex; gap:9px; margin-top:18px;}
+  .modal .acts .btn{flex:1;}
+  /* chat is the safe, reversible action — make it read that way */
+  .resp .actions{display:flex; gap:8px; margin-top:11px;}
+  .resp .actions .btn{padding:12px;}
+  .btn.chat{background:var(--ink); color:#fff;}
+  .btn.chat:hover{background:#000;}
+  .btn.choose{background:#fff; color:var(--red); border:1.5px solid var(--red);}
+  .btn.choose:hover{background:var(--red-tint);}

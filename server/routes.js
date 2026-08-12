@@ -425,10 +425,27 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
     purchased: !!mine, selected_provider: r.selected_provider
   };
   if (mine) {
+    // Staged disclosure. Buying unlocks the driver, the problem and enough distance
+    // to quote an accurate ETA — but NOT turn-by-turn detail. Only the company the
+    // driver actually chooses gets the exact pin, the landmark and the map link, so
+    // losing bidders can't roll out to a truck that isn't theirs.
+    const won = r.selected_provider === req.user.id;
+    const locs = await q('SELECT lat, lng FROM provider_locations WHERE user_id=$1', [req.user.id]);
+    let nearest = null;
+    for (const l of locs) {
+      const d = haversineMiles(r.lat, r.lng, l.lat, l.lng);
+      if (nearest === null || d < nearest) nearest = d;
+    }
     base.full = {
       driver_name: driver.name || 'Driver', driver_phone: driver.phone,
-      lat: r.lat, lng: r.lng, landmark: r.landmark, description: r.description,
-      photos: r.photos, truck: r.truck, trailer: r.trailer
+      description: r.description, photos: r.photos, truck: r.truck, trailer: r.trailer,
+      won,
+      distance_mi: nearest === null ? null : +nearest.toFixed(1),
+      eta_min: nearest === null ? null : Math.max(5, Math.round(nearest / 45 * 60)),
+      // exact navigation detail — winner only
+      lat: won ? r.lat : null,
+      lng: won ? r.lng : null,
+      landmark: won ? r.landmark : null
     };
   }
   res.json(base);

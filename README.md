@@ -91,6 +91,24 @@ Leave the Stripe/Twilio secrets out for now — the app runs fully in simulation
 
 **Service presets.** Provider onboarding offers eight one-tap trade presets (heavy towing, commercial tire, mobile diesel mechanic, trailer & reefer, tanker & pump, fuel delivery, welding & hydraulics, lockout & glass) that check the usual service set, which they then adjust — instead of facing a long checklist cold.
 
+## Staged location disclosure
+
+Buying a lead is not the same as winning the job, so the two unlock different things:
+
+| | On purchase | After the driver chooses them |
+|---|---|---|
+| Driver name & phone | yes | yes |
+| In-app chat | yes | yes |
+| Equipment, problem, photos | yes | yes |
+| Distance & drive time | yes | yes |
+| **Exact GPS, map link, mile marker** | **no** | **yes** |
+
+A buyer has everything needed to quote an accurate ETA and price, but cannot navigate to the truck until the driver picks them — which stops four wreckers rolling to the same breakdown and keeps a precise pin on a stranded driver away from companies who did not win.
+
+Losing bidders keep the contact info and chat they paid for (so there is no refund argument, and the driver keeps a fallback if the winner no-shows) but the pin never unlocks for them. Drivers see a reminder in chat not to volunteer their exact spot before choosing.
+
+Choosing a provider is irreversible, so it goes through a confirmation dialog that spells out the consequences, and **Chat first** is styled as the primary action on every responder card.
+
 ## The admin dashboard
 
 Every number on the Overview page is clickable and opens the data behind it:
