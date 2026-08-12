@@ -1483,7 +1483,7 @@ async function vARequest(){
   const t = r.truck || {}, tr = r.trailer || {};
   const thread = list => list.length
     ? `<div class="chatbox" style="margin-top:10px">${list.map(m=>`
-        <div class="msg ${m.quote ? 'quotecard' : (m.from_driver ? 'them' : 'me')}" style="max-width:88%">
+        <div class="msg ${m.quote ? 'quotecard ' : ''}${m.from_driver ? 'them' : 'me'}" style="max-width:88%">
           <b class="k" style="font-size:10.5px; opacity:.75">${m.from_driver ? esc(dr.name || 'Driver') : esc(m.sender_name)}</b><br>
           ${m.quote ? `${ic('tag',13)} QUOTE ${fmt$(m.quote.amount_cents)}${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}` : esc(m.body)}
           <span class="t">${new Date(m.created_at).toLocaleString()}</span></div>`).join('')}</div>`

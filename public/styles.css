@@ -123,7 +123,11 @@
   .msg{max-width:78%; padding:10px 14px; border-radius:17px; font-size:13.5px; line-height:1.45;}
   .msg.them{background:#e9e9eb; align-self:flex-start; border-bottom-left-radius:5px;}
   .msg.me{background:var(--red); color:#fff; align-self:flex-end; border-bottom-right-radius:5px;}
-  .msg.quotecard{background:#fff; border:1.5px solid var(--red); align-self:flex-start;}
+  /* Quote cards keep the white/red look no matter who sent them, but must reset the
+     text colour or .msg.me's white type renders invisible on the white card. */
+  .msg.quotecard{background:#fff; border:1.5px solid var(--red); color:var(--ink);}
+  .msg.quotecard.me{align-self:flex-end; border-bottom-right-radius:5px;}
+  .msg.quotecard.them{align-self:flex-start; border-bottom-left-radius:5px;}
   .msg .t{display:block; font-size:10px; opacity:.55; margin-top:3px;}
   .chatin{display:flex; gap:8px; margin-top:12px;}
   .chatin input{flex:1; border-radius:99px;}

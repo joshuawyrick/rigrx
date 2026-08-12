@@ -1,0 +1,8 @@
+# Keep line endings consistent so Windows and Linux copies don't look "changed"
+# when nothing actually changed. Without this, every file appears modified after
+# pasting in an update, which buries the files that genuinely differ.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
