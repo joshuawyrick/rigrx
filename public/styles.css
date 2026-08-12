@@ -32,6 +32,8 @@
     padding:22px 14px; flex-direction:column; gap:4px; position:sticky; top:0; height:100vh;}
   .sidebar .slogo{font-weight:800; letter-spacing:2px; font-size:18px; padding:0 10px 18px;}
   .sidebar .slogo span{color:var(--red);}
+  .sidebar .slogo.click{cursor:pointer;}
+  .sidebar .slogo.click:hover{color:var(--red);}
   .sidebar button{display:flex; align-items:center; gap:11px; width:100%; border:none; background:none;
     color:var(--muted); font-size:14px; font-weight:600; font-family:inherit; padding:11px 12px;
     border-radius:11px; cursor:pointer; text-align:left;}
@@ -44,6 +46,8 @@
     background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:20;}
   .topbar .logo{font-weight:800; letter-spacing:2px; font-size:16px;}
   .topbar .logo span{color:var(--red);}
+  .topbar .logo.click{cursor:pointer;}
+  .topbar .logo.click:hover{color:var(--red);}
   .topbar .sub{font-size:12px; color:var(--muted); font-weight:500;}
   .content{flex:1; width:100%; max-width:660px; margin:0 auto; padding:10px 16px 110px;}
   .content.wide{max-width:1080px;}
