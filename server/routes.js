@@ -9,7 +9,7 @@ const { chargeLead, refund, SIMULATED } = require('./payments');
 const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, haversineMiles, distanceBand } = require('./match');
 const { areaLabel } = require('./geo');
-const { getCatalog, ensurePricing, slugify } = require('./catalog');
+const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
 
 const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
@@ -84,6 +84,52 @@ router.post('/admin/catalog/:id/items', auth.requireRole('admin'), async (req, r
 router.delete('/admin/catalog/items/:id', auth.requireRole('admin'), async (req, res) => {
   await q('UPDATE service_items SET active=FALSE WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
+});
+
+router.get('/trades', async (req, res) => {
+  const all = req.query.all === '1' && req.user?.role === 'admin';
+  res.json(await getTrades({ activeOnly: !all }));
+});
+
+router.post('/admin/trades', auth.requireRole('admin'), async (req, res) => {
+  const label = String(req.body.label || '').trim();
+  if (!label) return res.status(400).json({ error: 'Name required' });
+  let key = slugify(label);
+  if (await one('SELECT id FROM provider_trades WHERE key=$1', [key])) key += Date.now().toString().slice(-4);
+  const max = await one('SELECT COALESCE(MAX(sort_order),0)::int AS m FROM provider_trades');
+  const t = await one(`INSERT INTO provider_trades (key, label, icon, blurb, sort_order)
+    VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [key, label, req.body.icon || 'wrench', String(req.body.blurb || '').slice(0, 80), max.m + 10]);
+  res.json(t);
+});
+
+router.put('/admin/trades/:id', auth.requireRole('admin'), async (req, res) => {
+  const b = req.body;
+  const t = await one(`UPDATE provider_trades SET
+      label = COALESCE($1,label), icon = COALESCE($2,icon), blurb = COALESCE($3,blurb),
+      active = COALESCE($4,active), presets = COALESCE($5,presets)
+    WHERE id=$6 RETURNING *`,
+    [b.label ?? null, b.icon ?? null, b.blurb ?? null,
+     typeof b.active === 'boolean' ? b.active : null,
+     b.presets ? JSON.stringify(b.presets) : null, req.params.id]);
+  res.json(t || {});
+});
+
+// How many companies would actually get this request? Lets the driver see the
+// cost of narrowing before they send, instead of discovering zero afterwards.
+router.get('/requests/preview', auth.requireAuth, async (req, res) => {
+  const lat = parseFloat(req.query.lat), lng = parseFloat(req.query.lng);
+  if (isNaN(lat) || isNaN(lng)) return res.status(400).json({ error: 'lat/lng required' });
+  let trades = [];
+  try { trades = JSON.parse(req.query.trades || '[]'); } catch (e) {}
+  const fake = {
+    service_key: req.query.service_key, lat, lng,
+    licensed_only: req.query.licensed_only === '1',
+    trade_filter: trades
+  };
+  const narrowed = await matchProviders(fake);
+  const wide = await matchProviders({ ...fake, licensed_only: false, trade_filter: [] });
+  res.json({ matches: narrowed.length, without_filters: wide.length });
 });
 
 /* ---------------- geocoding ---------------- */
@@ -182,7 +228,7 @@ router.delete('/trailers/:id', auth.requireAuth, async (req, res) => {
 
 /* ---------------- provider profile ---------------- */
 router.put('/provider/profile', auth.requireRole('provider'), async (req, res) => {
-  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities } = req.body;
+  const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities, primary_trade } = req.body;
   await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [req.user.id]);
   const p = await one(`
     UPDATE providers SET
@@ -190,13 +236,13 @@ router.put('/provider/profile', auth.requireRole('provider'), async (req, res) =
       after_phone = COALESCE($3, after_phone), email = COALESCE($4, email),
       hours = COALESCE($5, hours), services = COALESCE($6, services),
       equipment = COALESCE($7, equipment), verification = COALESCE($8, verification),
-      capabilities = COALESCE($9, capabilities)
-    WHERE user_id=$10 RETURNING *`,
+      capabilities = COALESCE($9, capabilities), primary_trade = COALESCE($10, primary_trade)
+    WHERE user_id=$11 RETURNING *`,
     [name, dispatch_phone, after_phone, email, hours,
      services ? JSON.stringify(services) : null,
      equipment ? JSON.stringify(equipment) : null,
      verification ? JSON.stringify(verification) : null,
-     capabilities ? JSON.stringify(capabilities) : null, req.user.id]);
+     capabilities ? JSON.stringify(capabilities) : null, primary_trade ?? null, req.user.id]);
   if (name) await q('UPDATE users SET name=$1 WHERE id=$2', [name, req.user.id]);
   res.json(p);
 });
@@ -224,7 +270,7 @@ router.post('/provider/custom-service', auth.requireRole('provider'), async (req
 router.get('/providers/:id/public', async (req, res) => {
   const p = await one(`
     SELECT p.user_id, p.name, p.hours, p.equipment, p.badges, p.jobs_won,
-           p.rating_sum, p.rating_count, p.license_verified, p.services, p.capabilities
+           p.rating_sum, p.rating_count, p.license_verified, p.services, p.capabilities, p.primary_trade
     FROM providers p WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const locations = await q('SELECT label, radius_mi FROM provider_locations WHERE user_id=$1', [req.params.id]);
@@ -274,13 +320,14 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   }
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
      JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly,
-     tirePos ? JSON.stringify(tirePos) : null, String(b.service_item || '').slice(0, 80)]);
+     tirePos ? JSON.stringify(tirePos) : null, String(b.service_item || '').slice(0, 80),
+     JSON.stringify(Array.isArray(b.trade_filter) ? b.trade_filter.slice(0, 8) : [])]);
   // remember the driver's preference for next time
   await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
@@ -306,7 +353,7 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
   if (!r) return res.status(404).json({ error: 'Not found' });
   const responders = await q(`
     SELECT pu.provider_id, pu.slot, pu.premium, pu.created_at,
-           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges, p.license_verified,
+           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges, p.license_verified, p.primary_trade,
            (SELECT m.quote FROM messages m
              WHERE m.request_id=pu.request_id AND m.provider_id=pu.provider_id AND m.quote IS NOT NULL
              ORDER BY m.id DESC LIMIT 1) AS quote
@@ -350,8 +397,9 @@ router.post('/requests/:id/complete', auth.requireAuth, async (req, res) => {
 // Safety valve: a driver who chose "licensed only" and got no responders
 // can open the same request to every approved company without re-typing it.
 router.post('/requests/:id/open-to-all', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET licensed_only=FALSE
-    WHERE id=$1 AND driver_id=$2 AND status='open' AND licensed_only=TRUE RETURNING *`,
+  const r = await one(`UPDATE requests SET licensed_only=FALSE, trade_filter='[]'
+    WHERE id=$1 AND driver_id=$2 AND status='open'
+      AND (licensed_only=TRUE OR jsonb_array_length(trade_filter) > 0) RETURNING *`,
     [req.params.id, req.user.id]);
   if (!r) return res.status(400).json({ error: 'Nothing to widen' });
   const price = await one('SELECT * FROM pricing WHERE service_key=$1', [r.service_key]);
@@ -424,7 +472,8 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
     JOIN users u ON u.id = r.driver_id
     WHERE r.status='open' AND r.created_at > NOW() - INTERVAL '6 hours'
       AND (r.licensed_only = FALSE OR $1::boolean = TRUE)
-    ORDER BY r.id DESC LIMIT 50`, [p?.license_verified || false]);
+      AND (jsonb_array_length(r.trade_filter) = 0 OR r.trade_filter ? $2)
+    ORDER BY r.id DESC LIMIT 50`, [p?.license_verified || false, p?.primary_trade || '']);
   // count what an unverified provider is missing, to nudge them to send paperwork
   const missed = p?.license_verified ? { n: 0 } : await one(`
     SELECT COUNT(*)::int AS n FROM requests
@@ -525,6 +574,9 @@ router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => 
   if (!r) return res.status(400).json({ error: 'Lead is no longer open' });
   if (r.licensed_only && !p.license_verified)
     return res.status(403).json({ error: 'This driver requested licensed companies only' });
+  const tf = Array.isArray(r.trade_filter) ? r.trade_filter : [];
+  if (tf.length && !tf.includes(p.primary_trade))
+    return res.status(403).json({ error: 'This driver asked for a different kind of company' });
 
   const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, req.user.id]);
   if (existing) return res.status(400).json({ error: 'You already own this lead' });
@@ -684,7 +736,7 @@ router.get('/admin/overview', auth.requireRole('admin'), async (req, res) => {
 
 router.get('/admin/providers', auth.requireRole('admin'), async (req, res) => {
   const rows = await q(`
-    SELECT p.user_id, p.name, p.email, p.approved, p.license_verified, p.verification, p.created_at, u.phone,
+    SELECT p.user_id, p.name, p.email, p.approved, p.license_verified, p.verification, p.created_at, p.primary_trade, u.phone,
       (SELECT COUNT(*)::int FROM provider_locations l WHERE l.user_id=p.user_id) AS location_count
     FROM providers p JOIN users u ON u.id=p.user_id
     ORDER BY p.approved ASC, p.created_at DESC LIMIT 100`);

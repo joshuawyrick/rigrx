@@ -106,6 +106,16 @@ One catalog feeds all three sides: the driver's request buttons (filtered to dri
 
 Practical note: a brand-new category reaches nobody until service companies check something under it. Add categories as demand appears — the Requested Services queue is providers telling you exactly what is missing.
 
+## Provider trades
+
+Each company picks **one primary trade** during onboarding — Heavy towing & recovery, Commercial tire service, Mobile diesel mechanic, Trailer & reefer repair, Tanker & pump service, Fuel & fluid delivery, Mobile welding & hydraulics, Lockout & glass. That single pick does two jobs: it becomes their badge across the app, and it pre-checks the services that trade normally performs so they aren't facing a blank checklist.
+
+The badge appears on their public profile, on the driver's responder cards, in provider settings, and throughout the admin panel. Trades are admin-managed the same way categories are — add, rename or retire them from the API, and each trade carries its own service presets.
+
+**Drivers can narrow by trade.** On the final request screen there's an optional "only companies whose main work is…" row alongside the licensed-only toggle. Because narrowing can strand a driver, the screen runs a **live match preview**: it shows how many companies will actually be alerted, and how many would be alerted without the filters, before they send. If they send anyway and nobody matches, the one-tap "send to all approved companies" button clears both filters.
+
+Filtering is enforced in three places — the notification blast, the browsable lead feed, and the purchase endpoint — so a company outside the requested trade cannot see or buy the lead by any route.
+
 ## Staged location disclosure
 
 Buying a lead is not the same as winning the job, so the two unlock different things:

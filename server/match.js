@@ -52,15 +52,18 @@ async function matchProviders(request, extraMiles = 0) {
   const cat = await one('SELECT label FROM service_categories WHERE key=$1', [request.service_key]);
   const categoryLabel = cat?.label || null;
   // If the driver asked for licensed companies only, unverified providers are excluded.
+  // A trade filter is the driver saying "only companies whose main work is this".
+  const trades = Array.isArray(request.trade_filter) ? request.trade_filter : [];
   const rows = await q(`
-    SELECT p.user_id, p.name, p.services, p.license_verified, u.phone,
+    SELECT p.user_id, p.name, p.services, p.license_verified, p.primary_trade, u.phone,
            l.lat, l.lng, l.radius_mi
     FROM providers p
     JOIN users u ON u.id = p.user_id
     JOIN provider_locations l ON l.user_id = p.user_id
     WHERE p.approved = TRUE
-      AND ($1::boolean = FALSE OR p.license_verified = TRUE)`,
-    [!!request.licensed_only]);
+      AND ($1::boolean = FALSE OR p.license_verified = TRUE)
+      AND ($2::int = 0 OR p.primary_trade = ANY($3::text[]))`,
+    [!!request.licensed_only, trades.length, trades]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
     if (!offersCategory(r.services, request.service_key, categoryLabel)) continue;

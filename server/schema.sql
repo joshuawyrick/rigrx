@@ -197,6 +197,23 @@ CREATE TABLE IF NOT EXISTS service_items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_category ON service_items(category_id);
 
+-- What kind of shop a company is. One pick during onboarding both badges them
+-- and pre-checks the services that trade normally performs.
+CREATE TABLE IF NOT EXISTS provider_trades (
+  id         SERIAL PRIMARY KEY,
+  key        TEXT UNIQUE NOT NULL,
+  label      TEXT NOT NULL,
+  icon       TEXT NOT NULL DEFAULT 'wrench',
+  blurb      TEXT NOT NULL DEFAULT '',
+  presets    JSONB NOT NULL DEFAULT '{}',   -- {category_key: [service labels]} pre-checked on pick
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INTEGER NOT NULL DEFAULT 100,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS primary_trade TEXT NOT NULL DEFAULT '';
+-- Driver may narrow a request to companies whose main work is one of these
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS trade_filter JSONB NOT NULL DEFAULT '[]';
+
 -- The driver's optional "what kind?" refinement
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS service_item TEXT NOT NULL DEFAULT '';
 -- Which category an approved custom service was folded into

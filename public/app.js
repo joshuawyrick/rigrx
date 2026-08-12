@@ -35,11 +35,14 @@ const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
   activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null,
-  leadId: null, simulatedPayments: true, catalog: []
+  leadId: null, simulatedPayments: true, catalog: [], trades: []
 };
 async function loadCatalog(){
   try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
+  try { S.trades = await api('GET', '/trades'); } catch(e){ S.trades = []; }
 }
+const tradeByKey = k => (S.trades || []).find(t => t.key === k) || null;
+const tradeLabel = k => tradeByKey(k)?.label || '';
 const catByKey = k => (S.catalog || []).find(c => c.key === k) || null;
 const svcIconFor = k => catByKey(k)?.icon || 'box';
 async function loadMe(){
@@ -53,6 +56,7 @@ function nav(view, extra){
   Object.assign(S, extra || {});
   render();
   window.scrollTo(0, 0);
+  if (view === 'd-review') setTimeout(previewMatches, 60);
 }
 function homeFor(){
   if (!S.me) return 'signin';
@@ -323,7 +327,8 @@ async function vDHome(){
 function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no',
               lat: null, lng: null, photos: [],
-              licensed_only: !!S.me?.prefer_licensed_only };  // remembers last choice
+              licensed_only: !!S.me?.prefer_licensed_only,   // remembers last choice
+              trade_filter: [] };
   nav('d-request');
 }
 function vDRequest(){
@@ -542,20 +547,44 @@ function vDReview(){
   <div class="card">
     <span class="sec">Who should get this request?</span>
     <div class="chips" id="rq-licensed" style="margin-top:9px">
-      <span class="chip ${d.licensed_only ? '' : 'sel'}" data-v="0" onclick="togOne(this)">All approved companies</span>
-      <span class="chip ${d.licensed_only ? 'sel' : ''}" data-v="1" onclick="togOne(this)">${ic('check',13)} Licensed companies only</span>
+      <span class="chip ${d.licensed_only ? '' : 'sel'}" data-v="0" onclick="togOne(this); previewMatches()">All approved companies</span>
+      <span class="chip ${d.licensed_only ? 'sel' : ''}" data-v="1" onclick="togOne(this); previewMatches()">${ic('check',13)} Licensed companies only</span>
     </div>
-    <div class="faint" style="margin-top:8px; line-height:1.5">Every company on RIGRX is vetted and approved by us. "Licensed only" narrows it further to companies whose license we've verified on file — safer, but fewer responders and possibly a longer wait.</div>
+    <label class="f">Only companies whose main work is… <span style="text-transform:none; letter-spacing:0; font-weight:500">(optional)</span></label>
+    <div class="chips" id="rq-trades">
+      ${(S.trades||[]).map(t=>`<span class="chip ${(d.trade_filter||[]).includes(t.key)?'sel':''}" data-key="${t.key}" onclick="tog(this); previewMatches()">${esc(t.label)}</span>`).join('')}
+    </div>
+    <div class="faint" style="margin-top:10px; line-height:1.5" id="matchPreview">Checking how many companies match…</div>
   </div>
   <div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('bell',14)} Qualified providers near you will be texted the moment you send. Up to <b class="k">4</b> can respond — you pick the winner. <b class="k">Free for you.</b></div>
   </div>
   <button class="btn big" onclick="sendRequest(this)">${ic('send',17)} SEND REQUEST</button>`;
 }
-async function sendRequest(btn){
-  btn.disabled = true;
+function readFilters(){
   const d = S.draft;
   d.licensed_only = $('rq-licensed')?.querySelector('.chip.sel')?.dataset.v === '1';
+  d.trade_filter = [...($('rq-trades')?.querySelectorAll('.chip.sel') || [])].map(c => c.dataset.key);
+  return d;
+}
+// Show the cost of narrowing BEFORE sending, rather than discovering zero after.
+async function previewMatches(){
+  const d = readFilters();
+  const el = $('matchPreview');
+  if (!el || !d.lat) return;
+  try {
+    const qs = `lat=${d.lat}&lng=${d.lng}&service_key=${encodeURIComponent(d.service_key)}` +
+               `&licensed_only=${d.licensed_only ? 1 : 0}&trades=${encodeURIComponent(JSON.stringify(d.trade_filter))}`;
+    const p = await api('GET', '/requests/preview?' + qs);
+    const narrowed = d.licensed_only || d.trade_filter.length;
+    el.innerHTML = p.matches === 0
+      ? `<span style="color:var(--red)">${ic('warn',12)} <b>No companies match these filters.</b> ${p.without_filters} would be alerted without them — loosen the choices above, or send anyway and you can widen it after.</span>`
+      : `${ic('check',12)} <b>${p.matches} compan${p.matches===1?'y':'ies'}</b> will be alerted${narrowed && p.without_filters > p.matches ? ` (${p.without_filters} without your filters)` : ''}.`;
+  } catch(e){ el.textContent = ''; }
+}
+async function sendRequest(btn){
+  btn.disabled = true;
+  const d = readFilters();
   try {
     const res = await api('POST', '/requests', d);
     toast(res.notified === 0
@@ -577,14 +606,14 @@ async function vDActive(){
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
     <div class="faint" style="margin-top:7px">3 standard slots + 1 premium slot · you choose the winner</div>
   </div>
-  ${r.licensed_only && r.notified_count === 0 && r.status === 'open' ? `
+  ${(r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0 && r.status === 'open' ? `
     <div class="card alert">
-      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">No licensed companies cover this spot.</b>
-      You asked for licensed companies only, and none nearby have a verified license on file — so nobody was alerted.</div>
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Nobody matched your filters.</b>
+      You narrowed this request, and no company nearby fits — so nobody was alerted.</div>
       <div style="height:10px"></div>
       <button class="btn" onclick="openToAll(${r.id})">Send to all approved companies instead</button>
     </div>` : ''}
-  ${filled === 0 && !(r.licensed_only && r.notified_count === 0) ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
+  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
   ${filled > 0 && r.status === 'open' ? `<div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">Message them before you choose.</b> Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.</div>
   </div>` : ''}
@@ -593,6 +622,7 @@ async function vDActive(){
       <div class="row"><div>
         <span class="nm" style="cursor:pointer" onclick="nav('d-pubprofile',{viewProviderId:${x.provider_id}})">${esc(x.name)} <span style="color:var(--faint)">›</span></span>
         <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? 'New'} · ${x.jobs_won} jobs${x.premium ? ' · premium responder' : ''}</span>
+        ${x.primary_trade ? ` <span class="pill red" style="font-size:9.5px">${esc(tradeLabel(x.primary_trade).toUpperCase())}</span>` : ''}
         ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} LICENSED</span>` : ''}</div>
       </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
       ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
@@ -657,6 +687,7 @@ async function vDPubProfile(){
     <b class="k" style="font-size:17px">${esc(p.name)}</b>
     <div style="margin-top:4px">${star5(Math.round(p.rating||0))} <b class="k" style="font-size:15px">${p.rating ?? ''}</b>
       <span class="faint">· ${p.rating_count ? p.rating_count + ' reviews' : 'New to RIGRX'} · ${p.jobs_won} jobs</span></div>
+    ${p.primary_trade ? `<div class="muted" style="margin-top:6px">${esc(tradeLabel(p.primary_trade))}</div>` : ''}
     <div class="chips" style="justify-content:center; margin-top:12px">
       ${p.license_verified ? `<span class="pill dark">${ic('check',11)} License verified</span>` : '<span class="pill gray">License not verified</span>'}
       ${(p.badges||[]).map(b=>`<span class="pill dark">${esc(b)}</span>`).join('')}
@@ -800,57 +831,22 @@ const CITIES = [
   ['Barstow, CA',34.8958,-117.0173],['Lancaster, CA',34.6868,-118.1542],['Santa Clarita, CA',34.3917,-118.5426],
   ['Los Angeles, CA',34.0549,-118.2426],['Stockton, CA',37.9577,-121.2908],['Sacramento, CA',38.5816,-121.4944]
 ];
-// Preset labels were written against the original catalog names
-const PRESET_LEGACY = {
-  'Towing & Recovery':'towing', 'Tires':'tires', 'Mobile Mechanic':'mechanic',
-  'Trailer / Reefer':'trailer', 'Fuel & Fluids':'fuel', 'Other':'other'
-};
 
-/* One tap instead of two hundred checkboxes — the usual service set per trade. */
-const PRESETS = {
-  'Heavy towing & recovery': {
-    'Towing & Recovery': ['Heavy tow','Medium tow','Winch-out','Rotator / rollover','Accident recovery','Load transfer','Decking / undecking'],
-    'Other': ['Load securement']
-  },
-  'Commercial tire service': {
-    'Tires': ['Roadside tire replacement','Tire repair / section','Mobile tire service','Air-up / valve stems']
-  },
-  'Mobile diesel mechanic': {
-    'Mobile Mechanic': ['Jump start','Batteries / starters','Engine diagnostics','DPF / regen','Air system & brakes','Coolant / overheating','Electrical & lighting','Wheel seals / hubs','Driveline','A/C & HVAC','APU repair'],
-    'Other': ['On-site PM service','DOT inspection help']
-  },
-  'Trailer & reefer repair': {
-    'Trailer / Reefer': ['Reefer repair','Trailer brakes & air','Lights / ABS / 7-way','Landing gear','Doors / roll-up','Liftgate','Chassis repair'],
-    'Mobile Mechanic': ['Electrical & lighting']
-  },
-  'Tanker & pump service': {
-    'Trailer / Reefer': ['Tanker pump / wet-line','Trailer brakes & air'],
-    'Mobile Mechanic': ['Hydraulics / wet kits','Mobile welding']
-  },
-  'Fuel & fluid delivery': {
-    'Fuel & Fluids': ['Diesel delivery','DEF delivery','Gelled fuel rescue','Coolant / oil delivery']
-  },
-  'Mobile welding & hydraulics': {
-    'Mobile Mechanic': ['Mobile welding','Hydraulics / wet kits'],
-    'Trailer / Reefer': ['Chassis repair','Landing gear']
-  },
-  'Lockout & glass': {
-    'Other': ['Lockout','Mobile glass']
-  }
-};
-function applyPreset(name){
-  const preset = PRESETS[name];
-  if (!preset) return;
-  for (const [catLabel, items] of Object.entries(preset)) {
-    const cat = (S.catalog||[]).find(c => c.label === catLabel) ||
-                (S.catalog||[]).find(c => PRESET_LEGACY[catLabel] === c.key);
-    const group = cat ? $('svc-' + cat.key) : null;
+
+// Picking a trade badges the company AND pre-checks the services that trade
+// normally performs — one decision instead of two.
+function pickTrade(el){
+  togOne(el);
+  const t = tradeByKey(el.dataset.key);
+  if (!t) return;
+  for (const [catKey, items] of Object.entries(t.presets || {})) {
+    const group = $('svc-' + catKey);
     if (!group) continue;
     [...group.querySelectorAll('.chip')].forEach(chip => {
       if (items.includes(chip.textContent.trim())) chip.classList.add('sel');
     });
   }
-  toast(name + ' services checked — adjust anything below');
+  toast(t.label + ' — typical services checked, adjust anything below');
 }
 
 /* Yes/no flags that make matching precise without a long form. */
@@ -935,12 +931,12 @@ function vPSetup3(){
   ${progress(3,5)}
   <h2 class="scr">What services do you offer?</h2>
   <p class="scrsub">Step 3 of 5 — start with what kind of shop you are, then adjust. More boxes = more leads; your rating keeps it honest.</p>
-  <div class="card" style="border-style:dashed">
-    <span class="sec">Quick start — tap the one that fits you</span>
-    <div class="chips" style="margin-top:10px">
-      ${Object.keys(PRESETS).map(k=>`<span class="chip" onclick="applyPreset('${k.replace(/'/g,"")}')">${k}</span>`).join('')}
+  <div class="card" style="border-color:var(--red)">
+    <span class="sec">What kind of company are you?</span>
+    <div class="faint" style="margin:6px 0 10px">This becomes your badge on RIGRX, and it checks the services that trade usually performs. Drivers can choose to send a request only to companies whose main work matches.</div>
+    <div class="chips" id="p-trade">
+      ${(S.trades||[]).map(t=>`<span class="chip ${t.key===(S.provider?.primary_trade||'')?'sel':''}" data-key="${t.key}" onclick="pickTrade(this)">${ic(t.icon,14)} ${esc(t.label)}</span>`).join('')}
     </div>
-    <div class="faint" style="margin-top:8px">This checks the usual services for that trade — you can add or remove any of them below.</div>
   </div>
   ${(S.catalog||[]).map(c=>`
   <div class="card">
@@ -977,7 +973,9 @@ async function savePSetup3(){
   const services = {};
   for (const c of (S.catalog||[])) services[c.key] = selOf('svc-' + c.key);
   if (!Object.values(services).some(v=>v.length)) return toast('Select at least one service');
-  await api('PUT', '/provider/profile', { services });
+  const trade = $('p-trade')?.querySelector('.chip.sel')?.dataset.key || '';
+  if (!trade) return toast('Pick what kind of company you are first');
+  await api('PUT', '/provider/profile', { services, primary_trade: trade });
   await loadMe();
   nav('p-setup4');
 }
@@ -1222,7 +1220,7 @@ async function vPSettings(){
   <div class="cols2"><div>
   <div class="card">
     <div class="row"><span class="sec">Company</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup1')">${ic('edit',13)} Edit</span></div>
-    <div class="mini" style="margin-top:7px; line-height:1.8"><b class="k">${esc(p.name)}</b><br>${esc(p.dispatch_phone)} · ${esc(p.email)}<br>${esc(p.hours)}</div>
+    <div class="mini" style="margin-top:7px; line-height:1.8"><b class="k">${esc(p.name)}</b>${p.primary_trade ? ` <span class="pill red">${esc(tradeLabel(p.primary_trade).toUpperCase())}</span>` : ' <span class="pill gray">NO TRADE SET</span>'}<br>${esc(p.dispatch_phone)} · ${esc(p.email)}<br>${esc(p.hours)}</div>
   </div>
   <div class="card">
     <div class="row"><span class="sec">Locations & coverage</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup2')">${ic('edit',13)} Edit</span></div>
@@ -1325,7 +1323,7 @@ async function vAProviders(){
   const pending = rows.filter(p=>!p.approved), live = rows.filter(p=>p.approved);
   const row = p => `<div class="card click" onclick="nav('a-provider',{adminProviderId:${p.user_id}})">
     <div class="row"><div><b class="mini k">${esc(p.name || '(no name yet)')}</b>
-      <div class="faint">${esc(p.phone)} · ${p.location_count} location${p.location_count===1?'':'s'} ·
+      <div class="faint">${p.primary_trade ? esc(tradeLabel(p.primary_trade)) + ' · ' : ''}${esc(p.phone)} · ${p.location_count} location${p.location_count===1?'':'s'} ·
       License: ${p.verification?.license ? esc(p.verification.license) : 'none given'}</div></div>
     <span style="display:inline-flex; gap:6px; align-items:center">
       ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : ''}
