@@ -37,13 +37,16 @@ function distanceBand(mi) {
 // extraMiles widens the search when nobody matched (radius auto-expansion).
 async function matchProviders(request, extraMiles = 0) {
   const category = KEY_TO_CATEGORY[request.service_key] || 'Other';
+  // If the driver asked for licensed companies only, unverified providers are excluded.
   const rows = await q(`
-    SELECT p.user_id, p.name, p.services, u.phone,
+    SELECT p.user_id, p.name, p.services, p.license_verified, u.phone,
            l.lat, l.lng, l.radius_mi
     FROM providers p
     JOIN users u ON u.id = p.user_id
     JOIN provider_locations l ON l.user_id = p.user_id
-    WHERE p.approved = TRUE`);
+    WHERE p.approved = TRUE
+      AND ($1::boolean = FALSE OR p.license_verified = TRUE)`,
+    [!!request.licensed_only]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
     const services = r.services || {};

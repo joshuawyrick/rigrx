@@ -326,7 +326,8 @@ async function vDHome(){
 }
 function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no',
-              lat: null, lng: null, photos: [] };
+              lat: null, lng: null, photos: [],
+              licensed_only: !!S.me?.prefer_licensed_only };  // remembers last choice
   nav('d-request');
 }
 function vDRequest(){
@@ -448,6 +449,14 @@ function vDReview(){
       <span class="muted">Photos</span> &nbsp;${d.photos.length || 'none'}
     </div>
   </div>
+  <div class="card">
+    <span class="sec">Who should get this request?</span>
+    <div class="chips" id="rq-licensed" style="margin-top:9px">
+      <span class="chip ${d.licensed_only ? '' : 'sel'}" data-v="0" onclick="togOne(this)">All approved companies</span>
+      <span class="chip ${d.licensed_only ? 'sel' : ''}" data-v="1" onclick="togOne(this)">${ic('check',13)} Licensed companies only</span>
+    </div>
+    <div class="faint" style="margin-top:8px; line-height:1.5">Every company on RIGRX is vetted and approved by us. "Licensed only" narrows it further to companies whose license we've verified on file — safer, but fewer responders and possibly a longer wait.</div>
+  </div>
   <div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('bell',14)} Qualified providers near you will be texted the moment you send. Up to <b class="k">4</b> can respond — you pick the winner. <b class="k">Free for you.</b></div>
   </div>
@@ -456,9 +465,12 @@ function vDReview(){
 async function sendRequest(btn){
   btn.disabled = true;
   const d = S.draft;
+  d.licensed_only = $('rq-licensed')?.querySelector('.chip.sel')?.dataset.v === '1';
   try {
     const res = await api('POST', '/requests', d);
-    toast(`${res.notified} provider${res.notified===1?'':'s'} notified${res.expanded ? ' (search radius expanded)' : ''}`);
+    toast(res.notified === 0
+      ? (d.licensed_only ? 'No licensed companies nearby — see options below' : 'No providers cover this area yet')
+      : `${res.notified} provider${res.notified===1?'':'s'} notified${res.expanded ? ' (search radius expanded)' : ''}`);
     nav('d-active', { activeRequestId: res.request.id });
   } catch(e){ btn.disabled = false; }
 }
@@ -475,12 +487,20 @@ async function vDActive(){
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
     <div class="faint" style="margin-top:7px">3 standard slots + 1 premium slot · you choose the winner</div>
   </div>
-  ${filled === 0 ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
+  ${r.licensed_only && r.notified_count === 0 && r.status === 'open' ? `
+    <div class="card alert">
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">No licensed companies cover this spot.</b>
+      You asked for licensed companies only, and none nearby have a verified license on file — so nobody was alerted.</div>
+      <div style="height:10px"></div>
+      <button class="btn" onclick="openToAll(${r.id})">Send to all approved companies instead</button>
+    </div>` : ''}
+  ${filled === 0 && !(r.licensed_only && r.notified_count === 0) ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
   ${d.responders.map(x=>`
     <div class="resp">
       <div class="row"><div>
         <span class="nm" style="cursor:pointer" onclick="nav('d-pubprofile',{viewProviderId:${x.provider_id}})">${esc(x.name)} <span style="color:var(--faint)">›</span></span>
-        <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? 'New'} · ${x.jobs_won} jobs${x.premium ? ' · premium responder' : ''}</span></div>
+        <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? 'New'} · ${x.jobs_won} jobs${x.premium ? ' · premium responder' : ''}</span>
+        ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} LICENSED</span>` : ''}</div>
       </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
       ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(x.quote.eta) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
       <div class="row" style="margin-top:11px; gap:8px">
@@ -493,6 +513,11 @@ async function vDActive(){
   ${r.status==='completed' ? `
     <div class="card click" onclick="nav('d-rate',{rateRequestId:${r.id}})"><div class="row"><span class="mini k">${ic('star',14)} &nbsp;Rate this provider</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
   ${r.status==='open' ? `<button class="btn ghost" onclick="cancelRequest(${r.id})">Cancel request</button>` : ''}`;
+}
+async function openToAll(reqId){
+  const res = await api('POST', `/requests/${reqId}/open-to-all`);
+  toast(`${res.notified} more compan${res.notified===1?'y':'ies'} notified`);
+  render();
 }
 async function chooseProvider(reqId, provId){
   await api('POST', `/requests/${reqId}/select`, { provider_id: provId });
@@ -518,6 +543,7 @@ async function vDPubProfile(){
     <div style="margin-top:4px">${star5(Math.round(p.rating||0))} <b class="k" style="font-size:15px">${p.rating ?? ''}</b>
       <span class="faint">· ${p.rating_count ? p.rating_count + ' reviews' : 'New to RIGRX'} · ${p.jobs_won} jobs</span></div>
     <div class="chips" style="justify-content:center; margin-top:12px">
+      ${p.license_verified ? `<span class="pill dark">${ic('check',11)} License verified</span>` : '<span class="pill gray">License not verified</span>'}
       ${(p.badges||[]).map(b=>`<span class="pill dark">${esc(b)}</span>`).join('')}
       <span class="pill gray">${esc(p.hours)}</span>
     </div>
@@ -850,6 +876,11 @@ async function vPFeed(){
   <h2 class="scr">Live Leads</h2>
   <p class="scrsub">Open requests inside your coverage that match your services</p>
   ${pendingBanner(d.approved)}
+  ${d.approved && !d.license_verified ? `<div class="card alert">
+    <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Your license isn't verified yet.</b>
+    ${d.missed_licensed_leads ? `You missed <b class="k">${d.missed_licensed_leads} lead${d.missed_licensed_leads===1?'':'s'}</b> this week from drivers who asked for licensed companies only.` : 'Some drivers request licensed companies only, and those leads stay hidden from you.'}
+    Add your license number and insurance in <a onclick="nav('p-setup5')">Settings</a> and RIGRX will review it.</div>
+  </div>` : ''}
   ${d.leads.length ? `<div class="cols2"><div>` +
     d.leads.filter((_,i)=>i%2===0).map(leadCard).join('') + `</div><div>` +
     d.leads.filter((_,i)=>i%2===1).map(leadCard).join('') +
@@ -991,7 +1022,8 @@ async function vPSettings(){
     <div class="row"><span class="sec">Verification</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup5')">${ic('edit',13)} Edit</span></div>
     <div class="checkrow"><span class="cico ${p.verification?.license?'on':''}">${ic('check',15)}</span><span class="mini">License ${p.verification?.license ? '— '+esc(p.verification.license) : '(add it)'}</span></div>
     <div class="checkrow"><span class="cico ${p.verification?.coi_file?'on':''}">${ic('check',15)}</span><span class="mini">Certificate of insurance ${p.verification?.coi_file ? '— uploaded' : '(upload)'}</span></div>
-    <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${p.approved ? 'Verified provider' : 'Pending RIGRX review'}</span></div>
+    <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${p.approved ? 'Approved — you can buy leads' : 'Pending RIGRX review'}</span></div>
+    <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${p.license_verified ? 'License verified — you receive licensed-only leads' : 'License not verified — you miss licensed-only leads'}</span></div>
   </div>
   <div class="card"><span class="sec">Billing</span>
     <div class="mini" style="margin-top:7px; line-height:1.7">${S.simulatedPayments ? ic('zap',13)+' Payment simulation mode — connect Stripe keys to charge real cards' : ic('card',13)+' Card ····'+esc(p.card_last4 || '????')+' · one-tap lead purchase'}</div></div>
@@ -1016,22 +1048,122 @@ async function vAHome(){
 }
 async function vAProviders(){
   const rows = await api('GET', '/admin/providers');
+  const pending = rows.filter(p=>!p.approved), live = rows.filter(p=>p.approved);
+  const row = p => `<div class="card click" onclick="nav('a-provider',{adminProviderId:${p.user_id}})">
+    <div class="row"><div><b class="mini k">${esc(p.name || '(no name yet)')}</b>
+      <div class="faint">${esc(p.phone)} · ${p.location_count} location${p.location_count===1?'':'s'} ·
+      License: ${p.verification?.license ? esc(p.verification.license) : 'none given'}</div></div>
+    <span style="display:inline-flex; gap:6px; align-items:center">
+      ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : ''}
+      ${p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
+      <span style="color:var(--red)">${ic('arrowR',16)}</span>
+    </span></div></div>`;
   return `
   <h2 class="scr">Providers</h2>
-  <p class="scrsub">Approve companies after checking their license & insurance</p>
-  ${rows.map(p=>`<div class="card">
-    <div class="row"><div><b class="mini k">${esc(p.name || '(no name yet)')}</b>
-      <div class="faint">${esc(p.phone)} · ${esc(p.email || 'no email')} · ${p.location_count} location${p.location_count===1?'':'s'} · License: ${esc(p.verification?.license || '—')}
-      ${p.verification?.coi_file ? ` · <a href="${esc(p.verification.coi_file)}" target="_blank">COI ›</a>` : ' · no COI'}</div></div>
+  <p class="scrsub">Click any company to see its full profile before you decide</p>
+  ${pending.length ? `<span class="sec">Waiting for review (${pending.length})</span>${pending.map(row).join('')}<div style="height:14px"></div>` : ''}
+  <span class="sec">Approved (${live.length})</span>
+  ${live.map(row).join('') || '<div class="card"><span class="muted">None yet</span></div>'}`;
+}
+async function vAProvider(){
+  const p = await api('GET', '/admin/providers/' + S.adminProviderId);
+  const v = p.verification || {};
+  const svcCount = Object.values(p.services || {}).reduce((a,b)=>a+(b?.length||0),0);
+  const missing = [];
+  if (!p.name) missing.push('business name');
+  if (!p.dispatch_phone) missing.push('dispatch phone');
+  if (!p.email) missing.push('dispatch email');
+  if (!p.locations.length) missing.push('service location');
+  if (!svcCount) missing.push('services offered');
+  if (!v.license) missing.push('license number');
+  if (!v.coi_file) missing.push('certificate of insurance');
+  if (!v.w9_file) missing.push('W-9');
+  return `
+  <button class="back" onclick="nav('a-providers')">${ic('chevL',15)} All providers</button>
+  <div class="row" style="margin-top:8px; flex-wrap:wrap; gap:8px">
+    <h2 class="scr" style="margin:0">${esc(p.name || '(no name yet)')}</h2>
     <span style="display:inline-flex; gap:6px">
-      ${p.approved
-        ? `<span class="pill solid">APPROVED</span><button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminProv(${p.user_id},'reject')">Suspend</button>`
-        : `<button class="btn" style="width:auto;padding:8px 14px;font-size:12px" onclick="adminProv(${p.user_id},'approve')">Approve</button>`}
-    </span></div></div>`).join('')}`;
+      ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : '<span class="pill gray">LICENSE NOT VERIFIED</span>'}
+      ${p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
+    </span>
+  </div>
+  <p class="scrsub" style="margin-top:4px">Signed up ${timeAgo(p.signed_up)} · ${p.stats.leads_bought} leads bought · ${fmt$(p.stats.spend)} spent</p>
+
+  ${missing.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} <b class="k">Profile incomplete —</b> missing: ${missing.join(', ')}. You can still approve them; drivers just see less.</div></div>`
+    : `<div class="card"><div class="mini">${ic('check',14)} <b class="k">Profile complete</b> — every onboarding field is filled in.</div></div>`}
+
+  <div class="cols2"><div>
+  <div class="card">
+    <span class="sec">Contact</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">Account phone</span> &nbsp;${esc(p.phone)}<br>
+      <span class="muted">Dispatch</span> &nbsp;${esc(p.dispatch_phone || '—')}<br>
+      <span class="muted">After hours</span> &nbsp;${esc(p.after_phone || '—')}<br>
+      <span class="muted">Email</span> &nbsp;${esc(p.email || '—')}<br>
+      <span class="muted">Hours</span> &nbsp;${esc(p.hours || '—')}
+    </div>
+  </div>
+  <div class="card">
+    <span class="sec">Coverage (${p.locations.length})</span>
+    ${p.locations.map(l=>`<div class="checkrow"><span class="cico on">${ic('pin',15)}</span><div class="mini"><b class="k">${esc(l.label)}</b><div class="faint">${l.radius_mi} mi radius · ${l.lat.toFixed(3)}, ${l.lng.toFixed(3)}${l.phone ? ' · '+esc(l.phone) : ''}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No locations — they will never match a lead</div>'}
+  </div>
+  <div class="card">
+    <span class="sec">Services offered (${svcCount})</span>
+    ${Object.entries(p.services||{}).filter(([,x])=>x?.length).map(([cat,items])=>`
+      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(cat)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">None selected</div>'}
+    ${p.custom.length ? `<div class="checkrow"><span class="cico">${ic('plus',15)}</span><div class="mini"><b class="k">Custom requests</b><div class="faint">${p.custom.map(c=>esc(c.name)+' ('+c.status+')').join(' · ')}</div></div></div>` : ''}
+  </div>
+  <div class="card">
+    <span class="sec">Equipment</span>
+    <div class="mini" style="margin-top:6px; line-height:1.8">${Object.entries(p.equipment||{}).filter(([,x])=>x).map(([k,x])=>`${esc(k)}: <b class="k">${esc(x)}</b>`).join(' · ') || '—'}</div>
+  </div>
+  </div><div>
+
+  <div class="card" style="border-color:var(--red)">
+    <span class="sec">License & documents</span>
+    <div class="mini listline" style="margin-top:6px">
+      <span class="muted">License #</span> &nbsp;${v.license ? '<b class="k">'+esc(v.license)+'</b>' : '<span style="color:var(--muted)">not provided</span>'}<br>
+      <span class="muted">Insurance (COI)</span> &nbsp;${v.coi_file ? `<a href="${esc(v.coi_file)}" target="_blank">open document ›</a>` : '<span style="color:var(--muted)">not uploaded</span>'}<br>
+      <span class="muted">W-9</span> &nbsp;${v.w9_file ? `<a href="${esc(v.w9_file)}" target="_blank">open document ›</a>` : '<span style="color:var(--muted)">not uploaded</span>'}<br>
+      <span class="muted">Verified on</span> &nbsp;${p.license_verified_at ? new Date(p.license_verified_at).toLocaleDateString() : '—'}
+    </div>
+    <div style="height:12px"></div>
+    ${p.license_verified
+      ? `<button class="btn ghost" onclick="adminLicense(${p.user_id}, false)">Remove license verification</button>`
+      : `<button class="btn dark" onclick="adminLicense(${p.user_id}, true)">${ic('check',15)} Mark license as verified</button>`}
+    <div class="faint" style="margin-top:8px; line-height:1.5">Verified companies also receive requests from drivers who chose "licensed companies only." Approval and license verification are separate — an unlicensed company can still work on RIGRX.</div>
+  </div>
+
+  <div class="card">
+    <span class="sec">Platform access</span>
+    <div class="faint" style="margin:6px 0 10px; line-height:1.5">Approved companies see leads and can buy them. Suspending stops both immediately.</div>
+    ${p.approved
+      ? `<button class="btn ghost" onclick="adminProv(${p.user_id},'reject')">Suspend this company</button>`
+      : `<button class="btn" onclick="adminProv(${p.user_id},'approve')">${ic('check',16)} Approve — allow them to buy leads</button>`}
+  </div>
+
+  <div class="card">
+    <span class="sec">Private notes (only you see these)</span>
+    <textarea rows="3" id="adm-notes" placeholder="Called to verify insurance 8/12 — good.">${esc(p.admin_notes)}</textarea>
+    <div style="height:8px"></div>
+    <button class="btn ghost" onclick="saveAdminNotes(${p.user_id})">Save notes</button>
+  </div>
+
+  ${p.reviews.length ? `<div class="card"><span class="sec">Recent driver reviews</span>
+    ${p.reviews.map(r=>`<div class="checkrow"><div><div>${star5(r.stars)} <span class="faint">${timeAgo(r.created_at)}</span></div>${r.comment?`<div class="mini" style="margin-top:3px">"${esc(r.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
+  </div></div>`;
 }
 async function adminProv(id, action){
   await api('POST', `/admin/providers/${id}/${action}`);
   toast(action==='approve' ? 'Provider approved & notified' : 'Provider suspended'); render();
+}
+async function adminLicense(id, verified){
+  await api('POST', `/admin/providers/${id}/license`, { verified });
+  toast(verified ? 'License verified — they now get licensed-only leads' : 'License verification removed'); render();
+}
+async function saveAdminNotes(id){
+  await api('POST', `/admin/providers/${id}/notes`, { notes: qv('adm-notes') });
+  toast('Notes saved');
 }
 async function vAPricing(){
   const rows = await api('GET', '/admin/pricing');
@@ -1106,7 +1238,7 @@ const VIEWS = {
   'p-setup1': vPSetup1, 'p-setup2': vPSetup2, 'p-setup3': vPSetup3, 'p-setup4': vPSetup4, 'p-setup5': vPSetup5,
   'p-feed': vPFeed, 'p-lead': vPLead, 'p-myleads': vPMyLeads, 'p-chat': ()=>chatView('p-threads'), 'p-threads': vThreads,
   'p-stats': vPStats, 'p-settings': vPSettings,
-  'a-home': vAHome, 'a-providers': vAProviders, 'a-pricing': vAPricing,
+  'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
   'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-requests': vARequests
 };
 const AUTH_LAYOUT = new Set(['signin','code','d-setup1','d-setup2','d-setup3','p-setup1','p-setup2','p-setup3','p-setup4','p-setup5','loading']);
@@ -1123,7 +1255,7 @@ const NAVS = {
     {ico:'sliders', label:'Settings', v:'p-settings'}],
   admin: [
     {ico:'home', label:'Overview', v:'a-home'},
-    {ico:'check', label:'Providers', v:'a-providers'},
+    {ico:'check', label:'Providers', v:'a-providers', also:['a-provider']},
     {ico:'tag', label:'Pricing', v:'a-pricing'},
     {ico:'card', label:'Sales', v:'a-purchases'},
     {ico:'plus', label:'Services', v:'a-custom'},

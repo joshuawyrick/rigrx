@@ -157,6 +157,16 @@ CREATE TABLE IF NOT EXISTS notifications_log (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ---- migrations for existing databases (safe to re-run) ----
+-- License verification is SEPARATE from approval: a provider can be approved
+-- (allowed on the platform) without a verified license. Drivers choose whether
+-- their request goes to licensed-only companies or all approved ones.
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS license_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS license_verified_at TIMESTAMPTZ;
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS admin_notes TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests  ADD COLUMN IF NOT EXISTS licensed_only BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users     ADD COLUMN IF NOT EXISTS prefer_licensed_only BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_purchases_request ON purchases(request_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(request_id, provider_id);

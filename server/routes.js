@@ -52,6 +52,7 @@ router.post('/auth/logout', async (req, res) => {
 function publicUser(u) {
   return { id: u.id, phone: u.phone, role: u.role, name: u.name, email: u.email,
            driver_type: u.driver_type, company: u.company,
+           prefer_licensed_only: !!u.prefer_licensed_only,
            driver_rating: u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(1) : null };
 }
 
@@ -150,7 +151,7 @@ router.post('/provider/custom-service', auth.requireRole('provider'), async (req
 router.get('/providers/:id/public', async (req, res) => {
   const p = await one(`
     SELECT p.user_id, p.name, p.hours, p.equipment, p.badges, p.jobs_won,
-           p.rating_sum, p.rating_count
+           p.rating_sum, p.rating_count, p.license_verified, p.services
     FROM providers p WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const locations = await q('SELECT label, radius_mi FROM provider_locations WHERE user_id=$1', [req.params.id]);
@@ -183,14 +184,17 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   if (b.truck_id) truck = (await one('SELECT data FROM trucks WHERE id=$1 AND user_id=$2', [b.truck_id, req.user.id]))?.data || {};
   if (b.trailer_id) trailer = (await one('SELECT data FROM trailers WHERE id=$1 AND user_id=$2', [b.trailer_id, req.user.id]))?.data || {};
 
+  const licensedOnly = !!b.licensed_only;
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      b.area_label || 'Near your GPS location', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
-     JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer)]);
+     JSON.stringify(b.photos || []), JSON.stringify(truck), JSON.stringify(trailer), licensedOnly]);
+  // remember the driver's preference for next time
+  await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
   // match & notify (auto-expand radius if nothing within providers' stated radii)
   let matches = await matchProviders(request);
@@ -214,7 +218,7 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
   if (!r) return res.status(404).json({ error: 'Not found' });
   const responders = await q(`
     SELECT pu.provider_id, pu.slot, pu.premium, pu.created_at,
-           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges,
+           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges, p.license_verified,
            (SELECT m.quote FROM messages m
              WHERE m.request_id=pu.request_id AND m.provider_id=pu.provider_id AND m.quote IS NOT NULL
              ORDER BY m.id DESC LIMIT 1) AS quote
@@ -255,6 +259,23 @@ router.post('/requests/:id/complete', auth.requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Safety valve: a driver who chose "licensed only" and got no responders
+// can open the same request to every approved company without re-typing it.
+router.post('/requests/:id/open-to-all', auth.requireAuth, async (req, res) => {
+  const r = await one(`UPDATE requests SET licensed_only=FALSE
+    WHERE id=$1 AND driver_id=$2 AND status='open' AND licensed_only=TRUE RETURNING *`,
+    [req.params.id, req.user.id]);
+  if (!r) return res.status(400).json({ error: 'Nothing to widen' });
+  const price = await one('SELECT * FROM pricing WHERE service_key=$1', [r.service_key]);
+  const already = (await q('SELECT provider_id FROM purchases WHERE request_id=$1', [r.id])).map(x => x.provider_id);
+  let matches = (await matchProviders(r)).filter(m => !already.includes(m.user_id));
+  if (!matches.length) matches = (await matchProviders(r, 50)).filter(m => !already.includes(m.user_id));
+  await notifyProviders(r, matches, price);
+  await q('UPDATE requests SET notified_count = notified_count + $1 WHERE id=$2', [matches.length, r.id]);
+  await q('UPDATE users SET prefer_licensed_only=FALSE WHERE id=$1', [req.user.id]);
+  res.json({ ok: true, notified: matches.length });
+});
+
 router.post('/requests/:id/cancel', auth.requireAuth, async (req, res) => {
   const r = await one(`UPDATE requests SET status='cancelled'
     WHERE id=$1 AND driver_id=$2 AND status='open' RETURNING *`, [req.params.id, req.user.id]);
@@ -285,7 +306,12 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
     JOIN pricing pr ON pr.service_key = r.service_key
     JOIN users u ON u.id = r.driver_id
     WHERE r.status='open' AND r.created_at > NOW() - INTERVAL '6 hours'
-    ORDER BY r.id DESC LIMIT 50`);
+      AND (r.licensed_only = FALSE OR $1::boolean = TRUE)
+    ORDER BY r.id DESC LIMIT 50`, [p?.license_verified || false]);
+  // count what an unverified provider is missing, to nudge them to send paperwork
+  const missed = p?.license_verified ? { n: 0 } : await one(`
+    SELECT COUNT(*)::int AS n FROM requests
+    WHERE status='open' AND licensed_only=TRUE AND created_at > NOW() - INTERVAL '7 days'`);
   const out = [];
   for (const r of open) {
     // distance from closest location; only show if inside any radius (+50mi grace band shown greyed? keep strict)
@@ -310,7 +336,12 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
       premium: slots.premiumOpen, purchased: !!mine
     });
   }
-  res.json({ leads: out, approved: p?.approved || false });
+  res.json({
+    leads: out,
+    approved: p?.approved || false,
+    license_verified: p?.license_verified || false,
+    missed_licensed_leads: missed.n
+  });
 });
 
 router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
@@ -350,6 +381,8 @@ router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => 
   const r = await one(`SELECT r.*, pr.standard_cents, pr.premium_cents FROM requests r
     JOIN pricing pr ON pr.service_key=r.service_key WHERE r.id=$1 AND r.status='open'`, [req.params.id]);
   if (!r) return res.status(400).json({ error: 'Lead is no longer open' });
+  if (r.licensed_only && !p.license_verified)
+    return res.status(403).json({ error: 'This driver requested licensed companies only' });
 
   const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, req.user.id]);
   if (existing) return res.status(400).json({ error: 'You already own this lead' });
@@ -509,12 +542,46 @@ router.get('/admin/overview', auth.requireRole('admin'), async (req, res) => {
 
 router.get('/admin/providers', auth.requireRole('admin'), async (req, res) => {
   const rows = await q(`
-    SELECT p.*, u.phone,
+    SELECT p.user_id, p.name, p.email, p.approved, p.license_verified, p.verification, p.created_at, u.phone,
       (SELECT COUNT(*)::int FROM provider_locations l WHERE l.user_id=p.user_id) AS location_count
     FROM providers p JOIN users u ON u.id=p.user_id
     ORDER BY p.approved ASC, p.created_at DESC LIMIT 100`);
   res.json(rows);
 });
+// Full provider dossier for the admin review page
+router.get('/admin/providers/:id', auth.requireRole('admin'), async (req, res) => {
+  const p = await one(`
+    SELECT p.*, u.phone, u.email AS user_email, u.created_at AS signed_up
+    FROM providers p JOIN users u ON u.id=p.user_id WHERE p.user_id=$1`, [req.params.id]);
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  const [locations, custom, stats, reviews] = await Promise.all([
+    q('SELECT * FROM provider_locations WHERE user_id=$1 ORDER BY id', [req.params.id]),
+    q('SELECT * FROM custom_services WHERE user_id=$1 ORDER BY id', [req.params.id]),
+    one(`SELECT COUNT(*)::int AS leads_bought, COALESCE(SUM(amount_cents),0)::int AS spend
+         FROM purchases WHERE provider_id=$1 AND refunded=FALSE`, [req.params.id]),
+    q(`SELECT stars, comment, created_at FROM reviews WHERE target_provider=$1 ORDER BY id DESC LIMIT 5`, [req.params.id])
+  ]);
+  res.json({
+    ...p, locations, custom, stats, reviews,
+    rating: p.rating_count ? +(p.rating_sum / p.rating_count).toFixed(1) : null
+  });
+});
+
+router.post('/admin/providers/:id/license', auth.requireRole('admin'), async (req, res) => {
+  const verified = !!req.body.verified;
+  await q(`UPDATE providers SET license_verified=$1, license_verified_at=CASE WHEN $1 THEN NOW() ELSE NULL END
+           WHERE user_id=$2`, [verified, req.params.id]);
+  const u = await one('SELECT * FROM users WHERE id=$1', [req.params.id]);
+  if (u && verified)
+    await sms(u.id, u.phone, 'RIGRX: Your license is verified. You now also receive leads from drivers who request licensed companies only.');
+  res.json({ ok: true, license_verified: verified });
+});
+
+router.post('/admin/providers/:id/notes', auth.requireRole('admin'), async (req, res) => {
+  await q('UPDATE providers SET admin_notes=$1 WHERE user_id=$2', [String(req.body.notes || '').slice(0, 2000), req.params.id]);
+  res.json({ ok: true });
+});
+
 router.post('/admin/providers/:id/approve', auth.requireRole('admin'), async (req, res) => {
   await q('UPDATE providers SET approved=TRUE WHERE user_id=$1', [req.params.id]);
   const u = await one('SELECT * FROM users WHERE id=$1', [req.params.id]);
