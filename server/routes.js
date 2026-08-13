@@ -16,6 +16,18 @@ const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
 const MAX_TOTAL_SLOTS = 4;
 
+// Express 4 does not catch errors thrown inside async handlers — they become
+// unhandled promise rejections, which take the whole server down. One malformed
+// request should return a 500, not knock every driver and provider offline, so
+// every handler registered below is wrapped to hand its errors to next().
+for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+  const original = router[method].bind(router);
+  router[method] = (path, ...handlers) => original(path, ...handlers.map(h =>
+    (typeof h === 'function' && h.length < 4)
+      ? function (req, res, next) { Promise.resolve(h(req, res, next)).catch(next); }
+      : h));
+}
+
 /* ---------------- uploads (photos, COI docs) ---------------- */
 const storage = multer.diskStorage({
   destination: path.join(__dirname, '..', 'uploads'),

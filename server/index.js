@@ -49,6 +49,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong on our end' });
 });
 
+// Last line of defence: log and keep serving rather than exiting the process.
+process.on('unhandledRejection', e => console.error('Unhandled promise rejection:', e));
+process.on('uncaughtException', e => console.error('Uncaught exception:', e));
+
 const server = http.createServer(app);
 
 // ---- WebSocket: authenticated by session cookie ----
