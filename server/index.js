@@ -41,6 +41,13 @@ function sendIndex(req, res) {
     res.type('html').send(html.replace(/__BUILD__/g, BUILD));
   });
 }
+// Public recruiting page for service companies. A real static page rather than an
+// app route, so it loads instantly and search engines can read it.
+app.get(['/for-service-companies', '/service-companies', '/providers'], (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.sendFile(path.join(PUBLIC_DIR, 'for-service-companies.html'));
+});
+
 app.get('*', sendIndex);
 
 // central error handler

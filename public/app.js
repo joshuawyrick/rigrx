@@ -1447,7 +1447,35 @@ async function vAProviders(){
   <p class="scrsub">Click any company to see its full profile before you decide</p>
   ${pending.length ? `<span class="sec">Waiting for review (${pending.length})</span>${pending.map(row).join('')}<div style="height:14px"></div>` : ''}
   <span class="sec">Approved (${live.length})</span>
-  ${live.map(row).join('') || '<div class="card"><span class="muted">None yet</span></div>'}`;
+  ${live.map(row).join('') || '<div class="card"><span class="muted">None yet</span></div>'}
+  ${await waitlistCard()}`;
+}
+// Companies that raised their hand from outside a live corridor. This list is the
+// map of where to expand next, so it lives right under the approval queue.
+async function waitlistCard(){
+  let rows = [];
+  try { rows = await api('GET', '/admin/waitlist'); } catch(e){ return ''; }
+  const waiting = rows.filter(r => !r.contacted);
+  return `
+  <div style="height:22px"></div>
+  <div class="row"><span class="sec">Coverage waitlist${waiting.length ? ' (' + waiting.length + ' not yet contacted)' : ''}</span></div>
+  <div class="faint" style="margin:6px 0 10px">Companies who found the recruiting page from outside a live area. Where they cluster is where to open next.</div>
+  ${rows.length ? rows.map(r=>`
+    <div class="card" style="${r.contacted ? 'opacity:.55' : ''}">
+      <div class="row"><div>
+        <b class="mini k">${esc(r.company)}</b>${r.trade ? ` <span class="pill red" style="font-size:9.5px">${esc(r.trade.toUpperCase())}</span>` : ''}
+        <div class="faint">${[r.city, r.state].filter(Boolean).map(esc).join(', ') || 'no location given'}
+          ${r.contact ? ' · ' + esc(r.contact) : ''}${r.phone ? ' · ' + esc(r.phone) : ''}${r.email ? ' · ' + esc(r.email) : ''}
+          · ${timeAgo(r.created_at)}</div>
+        ${r.note ? `<div class="mini" style="margin-top:6px">${esc(r.note)}</div>` : ''}
+      </div>
+      <button class="btn ghost" style="width:auto; padding:9px 14px; font-size:12px" onclick="toggleWaitlist(${r.id})">
+        ${r.contacted ? 'Mark not contacted' : 'Mark contacted'}</button></div>
+    </div>`).join('') : '<div class="card"><span class="muted">Nobody on the waitlist yet</span></div>'}`;
+}
+async function toggleWaitlist(id){
+  await api('POST', `/admin/waitlist/${id}/contacted`);
+  render();
 }
 async function vAProvider(){
   const p = await api('GET', '/admin/providers/' + S.adminProviderId);

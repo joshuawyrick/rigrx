@@ -122,6 +122,14 @@ One catalog feeds all three sides: the driver's request buttons (filtered to dri
 
 Practical note: a brand-new category reaches nobody until service companies check something under it. Add categories as demand appears — the Requested Services queue is providers telling you exactly what is missing.
 
+## Recruiting service companies
+
+`/for-service-companies` (also `/providers` and `/service-companies`) is a public landing page aimed at tow operators, tire shops and mobile mechanics. It's a real static file, not an app route, so it loads instantly and search engines can read it — which matters, because "how to get more towing leads" is a far less contested search than "tow truck near me", and the people searching it are the ones who pay you.
+
+The page ends in a **coverage waitlist** for companies outside a live corridor. Their submissions land in **Admin → Providers**, underneath the approval queue, with a contacted/not-contacted toggle. Where those companies cluster is the data for which corridor to open next — so a shop in a market you haven't reached is worth capturing, not turning away.
+
+`RIGRX_For_Service_Companies.pdf` is the printable one-page version of the same pitch, for leaving on a counter.
+
 ## Provider trades
 
 Each company picks **one primary trade** during onboarding — Heavy towing & recovery, Commercial tire service, Mobile diesel mechanic, Trailer & reefer repair, Tanker & pump service, Fuel & fluid delivery, Mobile welding & hydraulics, Lockout & glass. That single pick does two jobs: it becomes their badge across the app, and it pre-checks the services that trade normally performs so they aren't facing a blank checklist.

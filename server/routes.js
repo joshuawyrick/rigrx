@@ -146,6 +146,33 @@ router.get('/requests/preview', auth.requireAuth, async (req, res) => {
   res.json({ matches: narrowed.length, without_filters: wide.length });
 });
 
+/* ---------------- coverage waitlist ---------------- */
+// A company outside a live corridor still gets to raise its hand. Public on
+// purpose — this is the recruiting page, and where companies sign up is the
+// signal for which corridor to open next.
+router.post('/waitlist', async (req, res) => {
+  const b = req.body || {};
+  const clip = (v, n) => String(v || '').trim().slice(0, n);
+  const company = clip(b.company, 120);
+  if (!company) return res.status(400).json({ error: 'Company name is required' });
+  if (!clip(b.phone, 40) && !clip(b.email, 120))
+    return res.status(400).json({ error: 'Leave a phone number or an email so we can reach you' });
+  await q(`INSERT INTO waitlist (company, contact, phone, email, city, state, trade, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [company, clip(b.contact, 120), clip(b.phone, 40), clip(b.email, 120),
+     clip(b.city, 80), clip(b.state, 40), clip(b.trade, 80), clip(b.note, 500)]);
+  res.json({ ok: true });
+});
+
+router.get('/admin/waitlist', auth.requireRole('admin'), async (req, res) => {
+  res.json(await q(`SELECT * FROM waitlist ORDER BY contacted, id DESC LIMIT 300`));
+});
+
+router.post('/admin/waitlist/:id/contacted', auth.requireRole('admin'), async (req, res) => {
+  await q('UPDATE waitlist SET contacted = NOT contacted WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
+});
+
 /* ---------------- equipment reference lists ---------------- */
 // Powers every dropdown in onboarding so drivers pick instead of type.
 router.get('/equipment', (req, res) => res.json(EQUIP));

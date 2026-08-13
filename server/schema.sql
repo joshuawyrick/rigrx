@@ -251,3 +251,19 @@ CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
 CREATE INDEX IF NOT EXISTS idx_purchases_request ON purchases(request_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(request_id, provider_id);
 CREATE INDEX IF NOT EXISTS idx_locations_user ON provider_locations(user_id);
+
+-- Companies that found the recruiting page from outside a live coverage area.
+-- Where they sign up is how we decide which corridor to open next.
+CREATE TABLE IF NOT EXISTS waitlist (
+  id         SERIAL PRIMARY KEY,
+  company    TEXT NOT NULL DEFAULT '',
+  contact    TEXT NOT NULL DEFAULT '',
+  phone      TEXT NOT NULL DEFAULT '',
+  email      TEXT NOT NULL DEFAULT '',
+  city       TEXT NOT NULL DEFAULT '',
+  state      TEXT NOT NULL DEFAULT '',
+  trade      TEXT NOT NULL DEFAULT '',
+  note       TEXT NOT NULL DEFAULT '',
+  contacted  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
