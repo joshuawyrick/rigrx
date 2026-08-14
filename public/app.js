@@ -1342,7 +1342,7 @@ async function vPLead(){
     <div class="mini listline">
       ${full.won ? `
         <span class="muted">Exact spot</span> &nbsp;<b class="k">${esc(full.landmark || (full.lat.toFixed(4)+', '+full.lng.toFixed(4)))}</b><br>
-        <span class="muted">GPS</span> &nbsp;<a href="https://maps.google.com/?q=${full.lat},${full.lng}" target="_blank">${full.lat.toFixed(4)}, ${full.lng.toFixed(4)} — open in Maps ›</a><br>`
+`
       : `
         <span class="muted">Distance</span> &nbsp;<b class="k">${full.distance_mi != null ? full.distance_mi + ' mi · about ' + full.eta_min + ' min' : 'add a location in Settings'}</b><br>
         <span class="muted">Exact spot</span> &nbsp;<span style="color:var(--muted)">${ic('lock',12)} unlocks if the driver picks you</span><br>`}
@@ -1351,7 +1351,8 @@ async function vPLead(){
       <span class="muted">Trailer</span> &nbsp;${esc([full.trailer.type, full.trailer.len].filter(Boolean).join(' · ') || '—')}<br>
       <span class="muted">Photos</span> &nbsp;${(full.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">${ic('camera',13)} view</a>`).join(' · ') || 'none'}
     </div>
-    ${full.won ? '' : `<div class="divider"></div><div class="faint" style="line-height:1.5">${ic('lock',12)} You have the driver and the distance so you can quote accurately. The exact pin and mile marker unlock the moment they choose you — that keeps four trucks from rolling to the same breakdown.</div>`}
+    ${full.won ? `<div class="divider"></div>${directions(full.lat, full.lng)}`
+      : `<div class="divider"></div><div class="faint" style="line-height:1.5">${ic('lock',12)} You have the driver and the distance so you can quote accurately. The exact pin and mile marker unlock the moment they choose you — that keeps four trucks from rolling to the same breakdown.</div>`}
   </div>` : `
   <div class="card">
     <span class="sec">${ic('lock',13)} Unlocks when you buy</span>
@@ -1409,6 +1410,47 @@ async function vPMyLeads(){
     : f === 'open' ? 'Nothing open right now'
     : 'No leads purchased yet — check Live Leads'}</span></div>`}`;
 }
+/* ---------------- directions ---------------- */
+// Hand navigation off to whatever the person already uses rather than routing trucks
+// ourselves. Google Maps is preinstalled on Android; on iPhone the default is Apple
+// Maps and Google has to be downloaded — so the big button follows the platform and
+// the alternates sit underneath for anyone with a preference.
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function mapLinks(lat, lng){
+  return {
+    google: `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`,
+    apple:  `https://maps.apple.com/?daddr=${lat},${lng}&dirflg=d`,
+    waze:   `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`
+  };
+}
+
+// Big primary button + small alternates + the raw coordinates, which matter when a
+// tech is reading them to someone over the phone or typing them into a truck nav unit.
+function directions(lat, lng, opts = {}){
+  if (lat == null || lng == null) return '';
+  const L = mapLinks(lat, lng);
+  const ios = isIOS();
+  const primary = ios ? { href: L.apple, label: 'Apple Maps' } : { href: L.google, label: 'Google Maps' };
+  const alts = ios ? [['Google Maps', L.google], ['Waze', L.waze]]
+                   : [['Apple Maps', L.apple], ['Waze', L.waze]];
+  const coords = `${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}`;
+  return `
+  <a class="btn ${opts.subtle ? 'ghost' : 'dark'}" style="display:block; text-align:center; text-decoration:none"
+     href="${primary.href}" target="_blank" rel="noopener">${ic('pin',16)} Get directions</a>
+  <div class="row" style="gap:10px; margin-top:8px; flex-wrap:wrap; justify-content:flex-start">
+    <span class="faint">Open in:</span>
+    ${alts.map(([n,h])=>`<a href="${h}" target="_blank" rel="noopener" class="faint" style="color:var(--red); font-weight:600">${n}</a>`).join('')}
+    <span class="faint" style="cursor:pointer; margin-left:auto" onclick="copyCoords('${coords}')" title="Copy the coordinates">${coords} ${ic('folder',11)}</span>
+  </div>`;
+}
+function copyCoords(text){
+  navigator.clipboard?.writeText(text).then(
+    () => toast('Coordinates copied'),
+    () => toast(text));
+}
+
 /* ---------------- company people & jobs ---------------- */
 const memberRole = () => (S.me?.member_role || (S.me?.role === 'provider' ? 'owner' : ''));
 const isTech    = () => memberRole() === 'tech';
@@ -1501,6 +1543,8 @@ async function vPJobs(){
       </div><span class="pill ${st.c}">${st.t}</span></div>
       ${j.assign_bounced && !j.assigned_tech ? `<div class="mini" style="color:var(--red); margin-top:7px">${ic('warn',13)} Nobody accepted this — it came back to you. Reassign it.</div>` : ''}
       ${j.tech_name ? `<div class="mini" style="margin-top:7px">${ic('user',13)} ${esc(j.tech_name)}${j.eta_minutes && st.k==='enroute' ? ` · ETA ${j.eta_minutes} min` : ''}</div>` : ''}
+      ${!j.completed_at ? `<div class="mini" style="margin-top:9px">${ic('pin',12)} ${esc(j.landmark || j.area_label)}</div>
+        <div style="margin-top:8px">${directions(j.lat, j.lng, { subtle:true })}</div>` : ''}
       ${!j.completed_at ? `
       <div class="row" style="gap:8px; margin-top:10px; flex-wrap:wrap">
         <select id="as-${j.id}" style="flex:1; min-width:150px">
@@ -1551,11 +1595,11 @@ async function vTechJobs(){
           <span class="muted">Where</span> &nbsp;${esc(j.landmark || j.area_label)}<br>
           <span class="muted">Problem</span> &nbsp;${esc(j.description || j.service_label)}<br>
           ${tp ? `<span class="muted">Tire</span> &nbsp;<b class="k" style="color:var(--red)">${esc([tp.axle, tp.side, tp.position].filter(x=>x&&x!=='Single').join(' · '))}</b>${tp.size ? ' — ' + esc(tp.size) : ''}<br>` : ''}
-          <span class="muted">Rig</span> &nbsp;${esc(j.truck?.year||'')} ${esc(j.truck?.make||'')} ${esc(j.truck?.model||'')}${j.trailer?.type ? ' + ' + esc(j.trailer.type) : ''}${j.trailer?.hazmat ? ' <span style="color:var(--red); font-weight:700">(HAZMAT)</span>' : ''}
+          ${(() => { const rig = [j.truck?.year, j.truck?.make, j.truck?.model].filter(Boolean).join(' ');
+            const tr = j.trailer?.type ? ' + ' + j.trailer.type : '';
+            return (rig || tr) ? `<span class="muted">Rig</span> &nbsp;${esc(rig)}${esc(tr)}${j.trailer?.hazmat ? ' <span style="color:var(--red); font-weight:700">(HAZMAT)</span>' : ''}` : ''; })()}
         </div>
-        <a class="btn dark" style="display:block; text-align:center; text-decoration:none; margin-bottom:8px"
-           href="https://www.google.com/maps/dir/?api=1&destination=${j.lat},${j.lng}" target="_blank" rel="noopener">
-           ${ic('pin',16)} Get directions</a>
+        <div style="margin-bottom:12px">${directions(j.lat, j.lng)}</div>
         ${!j.enroute_at ? `
           <div class="row" style="gap:8px">
             <input type="number" id="eta-${j.id}" placeholder="ETA min" value="30" style="width:110px">

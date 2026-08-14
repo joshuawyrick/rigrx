@@ -184,7 +184,9 @@ A lead used to end when the driver picked you. Now that's where the job starts:
 
 Every step is timestamped, which is where response-time data comes from — assigned to accepted, accepted to rolling, rolling to on-scene. Nobody in this industry publishes those numbers.
 
-The technician's screen is deliberately spare: the driver's name and a tappable phone number, the exact spot, the fault, the failed tire position, the rig and its hazmat status, and a **Get directions** button that hands off to their own nav app rather than routing trucks itself.
+The technician's screen is deliberately spare: the driver's name and a tappable phone number, the exact spot, the fault, the failed tire position, the rig and its hazmat status, and directions.
+
+**Directions hand off to whatever they already use** rather than RIGRX routing trucks itself. The big button follows the platform — Google Maps on Android and desktop, Apple Maps on iPhone, since Google Maps isn't preinstalled on iOS and nobody should be forced to download an app on the way to a call. The other options sit underneath as small links, and the raw coordinates are there to tap and copy, which matters when a tech is reading them over the phone or typing them into a truck-specific nav unit. The same block appears on the dispatcher's job card and on any lead the company has won, because in a small shop the person taking the call is often the person driving to it.
 
 ## The company scoreboard
 
