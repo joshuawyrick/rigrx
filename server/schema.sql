@@ -275,3 +275,32 @@ CREATE TABLE IF NOT EXISTS waitlist (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_users_archived ON users(archived_at);
+
+-- ---- company people (owner / dispatcher / tech) ----
+-- A service company is more than one login. The owner runs the account, dispatchers
+-- take the lead alerts for their yard and hand work out, and techs only ever see the
+-- job they were given. Everyone signs in with their own phone — no shared logins and
+-- no passwords, because the one credential a tech always has on a call is their phone.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS member_role TEXT NOT NULL DEFAULT '';   -- owner | dispatcher | tech
+ALTER TABLE users ADD COLUMN IF NOT EXISTS assignable BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS member_location_id INTEGER;             -- which yard they work out of
+CREATE INDEX IF NOT EXISTS idx_users_company ON users(company_id);
+
+-- Existing provider accounts become the owner of their own company.
+UPDATE users u SET company_id = u.id, member_role = 'owner', assignable = TRUE
+  WHERE u.role = 'provider' AND u.company_id IS NULL;
+
+-- ---- the job, once a driver has chosen a company ----
+-- A won lead becomes a job that moves through assign -> accept -> on my way ->
+-- arrived -> complete. Those timestamps are also where response-time data comes from.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS assigned_tech  INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS assigned_at    TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS accepted_at    TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS enroute_at     TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS arrived_at     TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS completed_at   TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS eta_minutes    INTEGER;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS eta_set_at     TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS assign_bounced BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_requests_tech ON requests(assigned_tech);

@@ -7,7 +7,7 @@ const { q, one } = require('./db');
 const auth = require('./auth');
 const { chargeLead, refund, SIMULATED } = require('./payments');
 const { sms, wsPush } = require('./notify');
-const { matchProviders, notifyProviders, haversineMiles, distanceBand } = require('./match');
+const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand } = require('./match');
 const { areaLabel } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
 const EQUIP = require('./equipment');
@@ -235,6 +235,9 @@ router.post('/auth/logout', async (req, res) => {
 function publicUser(u) {
   return { id: u.id, phone: u.phone, role: u.role, name: u.name, email: u.email,
            driver_type: u.driver_type, company: u.company,
+           company_id: u.company_id || null,
+           member_role: u.member_role || (u.role === 'provider' ? 'owner' : ''),
+           assignable: !!u.assignable,
            prefer_licensed_only: !!u.prefer_licensed_only,
            driver_rating: u.rating_count ? +(u.rating_sum / u.rating_count).toFixed(1) : null };
 }
@@ -243,10 +246,11 @@ router.get('/me', async (req, res) => {
   if (!req.user) return res.json({ user: null });
   const out = { user: publicUser(req.user), simulatedPayments: SIMULATED() };
   if (req.user.role === 'provider' || req.user.role === 'admin') {
-    out.provider = await one('SELECT * FROM providers WHERE user_id=$1', [req.user.id]);
+    const cid = companyIdOf(req.user);
+    out.provider = await one('SELECT * FROM providers WHERE user_id=$1', [cid]);
     if (out.provider) {
-      out.provider.locations = await q('SELECT * FROM provider_locations WHERE user_id=$1 ORDER BY id', [req.user.id]);
-      out.provider.custom = await q('SELECT * FROM custom_services WHERE user_id=$1 ORDER BY id', [req.user.id]);
+      out.provider.locations = await q('SELECT * FROM provider_locations WHERE user_id=$1 ORDER BY id', [cid]);
+      out.provider.custom = await q('SELECT * FROM custom_services WHERE user_id=$1 ORDER BY id', [cid]);
     }
   }
   if (req.user.role === 'driver' || req.user.role === 'admin') {
@@ -293,9 +297,9 @@ router.delete('/trailers/:id', auth.requireAuth, async (req, res) => {
 });
 
 /* ---------------- provider profile ---------------- */
-router.put('/provider/profile', auth.requireRole('provider'), async (req, res) => {
+router.put('/provider/profile', requireOwner, async (req, res) => {
   const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities, primary_trade, duty_classes } = req.body;
-  await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [req.user.id]);
+  await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [companyIdOf(req.user)]);
   const p = await one(`
     UPDATE providers SET
       name = COALESCE($1, name), dispatch_phone = COALESCE($2, dispatch_phone),
@@ -310,28 +314,28 @@ router.put('/provider/profile', auth.requireRole('provider'), async (req, res) =
      equipment ? JSON.stringify(equipment) : null,
      verification ? JSON.stringify(verification) : null,
      capabilities ? JSON.stringify(capabilities) : null, primary_trade ?? null,
-     duty_classes ? JSON.stringify(duty_classes) : null, req.user.id]);
-  if (name) await q('UPDATE users SET name=$1 WHERE id=$2', [name, req.user.id]);
+     duty_classes ? JSON.stringify(duty_classes) : null, companyIdOf(req.user)]);
+  if (name) await q('UPDATE users SET name=$1 WHERE id=$2', [name, companyIdOf(req.user)]);
   res.json(p);
 });
 
-router.post('/provider/locations', auth.requireRole('provider'), async (req, res) => {
+router.post('/provider/locations', requireOwner, async (req, res) => {
   const { label, lat, lng, radius_mi = 50, phone = '' } = req.body;
   if (typeof lat !== 'number' || typeof lng !== 'number') return res.status(400).json({ error: 'lat/lng required' });
   const l = await one(
     'INSERT INTO provider_locations (user_id, label, lat, lng, radius_mi, phone) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-    [req.user.id, label || '', lat, lng, Math.min(200, Math.max(5, radius_mi)), phone]);
+    [companyIdOf(req.user), label || '', lat, lng, Math.min(200, Math.max(5, radius_mi)), phone]);
   res.json(l);
 });
-router.delete('/provider/locations/:id', auth.requireRole('provider'), async (req, res) => {
-  await q('DELETE FROM provider_locations WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+router.delete('/provider/locations/:id', requireOwner, async (req, res) => {
+  await q('DELETE FROM provider_locations WHERE id=$1 AND user_id=$2', [req.params.id, companyIdOf(req.user)]);
   res.json({ ok: true });
 });
 
-router.post('/provider/custom-service', auth.requireRole('provider'), async (req, res) => {
+router.post('/provider/custom-service', requireOwner, async (req, res) => {
   const name = String(req.body.name || '').trim().slice(0, 80);
   if (!name) return res.status(400).json({ error: 'Name required' });
-  const c = await one('INSERT INTO custom_services (user_id, name) VALUES ($1,$2) RETURNING *', [req.user.id, name]);
+  const c = await one('INSERT INTO custom_services (user_id, name) VALUES ($1,$2) RETURNING *', [companyIdOf(req.user), name]);
   res.json(c);
 });
 
@@ -430,8 +434,21 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
              ORDER BY m.id DESC LIMIT 1) AS quote
     FROM purchases pu JOIN providers p ON p.user_id = pu.provider_id
     WHERE pu.request_id=$1 AND pu.refunded=FALSE ORDER BY pu.slot`, [req.params.id]);
+  // Once a tech is rolling, the driver should see who is coming and when — that is
+  // the whole point of the job flow, and it is what they are actually anxious about.
+  let onTheWay = null;
+  if (r.selected_provider && r.enroute_at) {
+    const tech = r.assigned_tech ? await one('SELECT name, phone FROM users WHERE id=$1', [r.assigned_tech]) : null;
+    const comp = await one('SELECT name FROM providers WHERE user_id=$1', [r.selected_provider]);
+    onTheWay = {
+      company: comp?.name || '', tech_name: tech?.name || '', tech_phone: tech?.phone || '',
+      eta_minutes: r.eta_minutes, eta_set_at: r.eta_set_at,
+      arrived: !!r.arrived_at, completed: !!r.completed_at
+    };
+  }
   res.json({
     request: r,
+    on_the_way: onTheWay,
     responders: responders.map(x => ({
       ...x, rating: x.rating_count ? +(x.rating_sum / x.rating_count).toFixed(1) : null
     }))
@@ -520,8 +537,28 @@ function capabilityWarning(provider, r) {
   return 'Heads up — ' + notes.join(' and ') + ', and you have not marked that capability in your settings.';
 }
 
+// A service company can have several logins. Every provider route works on the
+// company record, so the owner, a dispatcher and a tech all resolve to the same one.
+function companyIdOf(user) { return user?.company_id || user?.id; }
 async function providerOf(req) {
-  return await one('SELECT * FROM providers WHERE user_id=$1', [req.user.id]);
+  return await one('SELECT * FROM providers WHERE user_id=$1', [companyIdOf(req.user)]);
+}
+// Techs only ever see work handed to them — never the lead feed, prices or the queue.
+function requireOwner(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  if (req.user.role === 'admin') return next();
+  if (req.user.role !== 'provider') return res.status(403).json({ error: 'provider account required' });
+  if ((req.user.member_role || 'owner') !== 'owner')
+    return res.status(403).json({ error: 'Only the account owner can change this' });
+  next();
+}
+function requireDispatch(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  if (req.user.role === 'admin') return next();
+  if (req.user.role !== 'provider') return res.status(403).json({ error: 'provider account required' });
+  if (req.user.member_role === 'tech')
+    return res.status(403).json({ error: 'Technicians see their assigned jobs only. Ask your dispatcher.' });
+  next();
 }
 async function slotInfo(requestId) {
   const rows = await q('SELECT slot, premium FROM purchases WHERE request_id=$1 AND refunded=FALSE ORDER BY slot', [requestId]);
@@ -532,9 +569,9 @@ async function slotInfo(requestId) {
            soldOut: total >= MAX_TOTAL_SLOTS };
 }
 
-router.get('/leads', auth.requireRole('provider'), async (req, res) => {
+router.get('/leads', requireDispatch, async (req, res) => {
   const p = await providerOf(req);
-  const locations = await q('SELECT * FROM provider_locations WHERE user_id=$1', [req.user.id]);
+  const locations = await q('SELECT * FROM provider_locations WHERE user_id=$1', [companyIdOf(req.user)]);
   const open = await q(`
     SELECT r.*, pr.standard_cents, pr.premium_cents,
       u.rating_sum AS d_rsum, u.rating_count AS d_rcount
@@ -564,7 +601,7 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
     if (best === null) continue;
     const slots = await slotInfo(r.id);
     if (slots.soldOut) continue;
-    const mine = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, req.user.id]);
+    const mine = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, companyIdOf(req.user)]);
     out.push({
       id: r.id, service_key: r.service_key, service_label: r.service_label,
       area_label: r.area_label, band: distanceBand(best),
@@ -589,13 +626,13 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
   });
 });
 
-router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
+router.get('/leads/:id', requireDispatch, async (req, res) => {
   const p = await providerOf(req);
   const r = await one(`SELECT r.*, pr.standard_cents, pr.premium_cents FROM requests r
     JOIN pricing pr ON pr.service_key=r.service_key WHERE r.id=$1`, [req.params.id]);
   if (!r) return res.status(404).json({ error: 'Not found' });
   const slots = await slotInfo(r.id);
-  const mine = await one('SELECT * FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [r.id, req.user.id]);
+  const mine = await one('SELECT * FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [r.id, companyIdOf(req.user)]);
   const driver = await one('SELECT * FROM users WHERE id=$1', [r.driver_id]);
   const base = {
     id: r.id, service_key: r.service_key, service_label: r.service_label,
@@ -619,8 +656,8 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
     // to quote an accurate ETA — but NOT turn-by-turn detail. Only the company the
     // driver actually chooses gets the exact pin, the landmark and the map link, so
     // losing bidders can't roll out to a truck that isn't theirs.
-    const won = r.selected_provider === req.user.id;
-    const locs = await q('SELECT lat, lng FROM provider_locations WHERE user_id=$1', [req.user.id]);
+    const won = r.selected_provider === companyIdOf(req.user);
+    const locs = await q('SELECT lat, lng FROM provider_locations WHERE user_id=$1', [companyIdOf(req.user)]);
     let nearest = null;
     for (const l of locs) {
       const d = haversineMiles(r.lat, r.lng, l.lat, l.lng);
@@ -641,7 +678,7 @@ router.get('/leads/:id', auth.requireRole('provider'), async (req, res) => {
   res.json(base);
 });
 
-router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => {
+router.post('/leads/:id/buy', requireDispatch, async (req, res) => {
   const p = await providerOf(req);
   if (!p) return res.status(400).json({ error: 'Complete your company profile first' });
   if (!p.approved) return res.status(403).json({ error: 'Your account is pending RIGRX approval' });
@@ -658,7 +695,7 @@ router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => 
   if (!dc.includes(r.duty_class || 'heavy'))
     return res.status(403).json({ error: 'You have not marked that you service this size of truck' });
 
-  const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, req.user.id]);
+  const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, companyIdOf(req.user)]);
   if (existing) return res.status(400).json({ error: 'You already own this lead' });
 
   const slots = await slotInfo(r.id);
@@ -672,36 +709,36 @@ router.post('/leads/:id/buy', auth.requireRole('provider'), async (req, res) => 
   const slot = slots.total + 1;
   try {
     await q(`INSERT INTO purchases (request_id, provider_id, slot, amount_cents, premium, stripe_payment)
-             VALUES ($1,$2,$3,$4,$5,$6)`, [r.id, req.user.id, slot, amount, premium, charge.paymentId]);
+             VALUES ($1,$2,$3,$4,$5,$6)`, [r.id, companyIdOf(req.user), slot, amount, premium, charge.paymentId]);
   } catch (e) {
     return res.status(409).json({ error: 'Slot was just taken — refresh the lead' });
   }
 
   // tell the driver instantly
   const driver = await one('SELECT * FROM users WHERE id=$1', [r.driver_id]);
-  wsPush(driver.id, 'responder', { request_id: r.id, provider_id: req.user.id, name: p.name, slot });
+  wsPush(driver.id, 'responder', { request_id: r.id, provider_id: companyIdOf(req.user), name: p.name, slot });
   await sms(driver.id, driver.phone, `RIGRX: ${p.name} unlocked your ${r.service_label} request and can now contact you. Open the app to chat.`);
 
   res.json({ ok: true, slot, premium, amount_cents: amount, simulated: charge.paymentId === 'simulated' });
 });
 
-router.get('/myleads', auth.requireRole('provider'), async (req, res) => {
+router.get('/myleads', requireDispatch, async (req, res) => {
   const rows = await q(`
     SELECT pu.*, r.service_label, r.area_label, r.status AS request_status, r.selected_provider, r.created_at AS requested_at
     FROM purchases pu JOIN requests r ON r.id = pu.request_id
-    WHERE pu.provider_id=$1 ORDER BY pu.id DESC LIMIT 50`, [req.user.id]);
-  res.json(rows.map(x => ({ ...x, won: x.selected_provider === req.user.id })));
+    WHERE pu.provider_id=$1 ORDER BY pu.id DESC LIMIT 50`, [companyIdOf(req.user)]);
+  res.json(rows.map(x => ({ ...x, won: x.selected_provider === companyIdOf(req.user) })));
 });
 
-router.get('/provider/stats', auth.requireRole('provider'), async (req, res) => {
+router.get('/provider/stats', requireDispatch, async (req, res) => {
   const p = await providerOf(req);
   const bought = await one(`SELECT COUNT(*)::int AS n, COALESCE(SUM(amount_cents),0)::int AS spend
-    FROM purchases WHERE provider_id=$1 AND refunded=FALSE`, [req.user.id]);
-  const won = await one(`SELECT COUNT(*)::int AS n FROM requests WHERE selected_provider=$1 AND status IN ('selected','completed')`, [req.user.id]);
+    FROM purchases WHERE provider_id=$1 AND refunded=FALSE`, [companyIdOf(req.user)]);
+  const won = await one(`SELECT COUNT(*)::int AS n FROM requests WHERE selected_provider=$1 AND status IN ('selected','completed')`, [companyIdOf(req.user)]);
   const week = await q(`
     SELECT to_char(created_at, 'Dy') AS day, COUNT(*)::int AS n
     FROM purchases WHERE provider_id=$1 AND created_at > NOW() - INTERVAL '7 days'
-    GROUP BY 1`, [req.user.id]);
+    GROUP BY 1`, [companyIdOf(req.user)]);
   // How long after buying a lead they actually said something to the driver. Speed is
   // what wins these jobs, so a company should be able to see its own number.
   const reply = await one(`
@@ -712,7 +749,7 @@ router.get('/provider/stats', auth.requireRole('provider'), async (req, res) => 
       WHERE request_id = pu.request_id AND sender_id = $1
     ) m ON TRUE
     WHERE pu.provider_id = $1 AND pu.refunded = FALSE AND m.first_at IS NOT NULL
-      AND m.first_at >= pu.created_at`, [req.user.id]);
+      AND m.first_at >= pu.created_at`, [companyIdOf(req.user)]);
   res.json({
     leads_bought: bought.n, spend_cents: bought.spend, jobs_won: won.n,
     win_rate: bought.n ? Math.round(won.n / bought.n * 100) : 0,
@@ -726,15 +763,241 @@ router.get('/provider/stats', auth.requireRole('provider'), async (req, res) => 
 });
 
 // Every review a driver left for this company, with the job it came from.
-router.get('/provider/reviews', auth.requireRole('provider'), async (req, res) => {
+router.get('/provider/reviews', requireDispatch, async (req, res) => {
   const rows = await q(`
     SELECT rv.stars, rv.tags, rv.comment, rv.created_at,
            req.id AS request_id, req.service_label, req.area_label
     FROM reviews rv JOIN requests req ON req.id = rv.request_id
-    WHERE rv.target_provider = $1 ORDER BY rv.id DESC LIMIT 100`, [req.user.id]);
+    WHERE rv.target_provider = $1 ORDER BY rv.id DESC LIMIT 100`, [companyIdOf(req.user)]);
   const breakdown = await q(`
-    SELECT stars, COUNT(*)::int AS n FROM reviews WHERE target_provider=$1 GROUP BY stars`, [req.user.id]);
+    SELECT stars, COUNT(*)::int AS n FROM reviews WHERE target_provider=$1 GROUP BY stars`, [companyIdOf(req.user)]);
   res.json({ reviews: rows, breakdown });
+});
+
+/* ---------------- jobs: won -> assigned -> on the way -> done ---------------- */
+// A lead ends when the driver picks you. The job starts there. These timestamps are
+// also where response-time data comes from, which nobody in this industry publishes.
+const JOB_COLS = `r.id, r.service_label, r.service_key, r.area_label, r.landmark, r.lat, r.lng,
+  r.description, r.situation, r.can_move, r.truck, r.trailer, r.tire_position, r.duty_class,
+  r.status, r.assigned_tech, r.assigned_at, r.accepted_at, r.enroute_at, r.arrived_at,
+  r.completed_at, r.eta_minutes, r.eta_set_at, r.assign_bounced, r.created_at`;
+
+async function jobFor(req, id, { techOnly = false } = {}) {
+  const r = await one(`SELECT * FROM requests WHERE id=$1 AND selected_provider=$2`,
+    [id, companyIdOf(req.user)]);
+  if (!r) return null;
+  if (techOnly && r.assigned_tech !== req.user.id) return null;
+  return r;
+}
+
+// The dispatcher's queue: everything this company won, newest first.
+router.get('/jobs', requireDispatch, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const rows = await q(`
+    SELECT ${JOB_COLS}, u.name AS driver_name, u.phone AS driver_phone,
+           t.name AS tech_name, t.phone AS tech_phone
+    FROM requests r
+    JOIN users u ON u.id = r.driver_id
+    LEFT JOIN users t ON t.id = r.assigned_tech
+    WHERE r.selected_provider = $1 AND r.status IN ('selected','completed')
+    ORDER BY (r.completed_at IS NOT NULL), r.id DESC LIMIT 60`, [cid]);
+  const techs = await q(`SELECT id, name, phone, member_role, member_location_id FROM users
+    WHERE company_id=$1 AND assignable=TRUE AND archived_at IS NULL ORDER BY name`, [cid]);
+  res.json({ jobs: rows, techs });
+});
+
+router.post('/jobs/:id/assign', requireDispatch, async (req, res) => {
+  const r = await jobFor(req, req.params.id);
+  if (!r) return res.status(404).json({ error: 'Not one of your jobs' });
+  if (r.completed_at) return res.status(400).json({ error: 'That job is already finished' });
+  const tech = await one(`SELECT * FROM users WHERE id=$1 AND company_id=$2
+    AND assignable=TRUE AND archived_at IS NULL`, [req.body.tech_id, companyIdOf(req.user)]);
+  if (!tech) return res.status(400).json({ error: 'Pick someone on your team' });
+
+  await q(`UPDATE requests SET assigned_tech=$1, assigned_at=NOW(), accepted_at=NULL,
+           assign_bounced=FALSE WHERE id=$2`, [tech.id, r.id]);
+  await sms(tech.id, tech.phone,
+    `RIGRX JOB: ${r.service_label} ${r.area_label}. Open the app to accept. ${process.env.BASE_URL || ''}`);
+  wsPush(tech.id, 'job_assigned', { request_id: r.id, service: r.service_label });
+  res.json({ ok: true });
+});
+
+router.post('/jobs/:id/accept', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, { techOnly: true });
+  if (!r) return res.status(404).json({ error: 'That job is not assigned to you' });
+  await q('UPDATE requests SET accepted_at=NOW(), assign_bounced=FALSE WHERE id=$1', [r.id]);
+  res.json({ ok: true });
+});
+
+// Declining hands it straight back rather than leaving a driver waiting on nobody.
+router.post('/jobs/:id/decline', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, { techOnly: true });
+  if (!r) return res.status(404).json({ error: 'That job is not assigned to you' });
+  await q(`UPDATE requests SET assigned_tech=NULL, assigned_at=NULL, accepted_at=NULL,
+           assign_bounced=TRUE WHERE id=$1`, [r.id]);
+  await notifyDispatch(r, `${req.user.name || 'A tech'} declined job #${r.id} — reassign it.`);
+  res.json({ ok: true });
+});
+
+router.post('/jobs/:id/enroute', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, { techOnly: true });
+  if (!r) return res.status(404).json({ error: 'That job is not assigned to you' });
+  const eta = Math.max(1, Math.min(600, Number(req.body.eta_minutes) || 30));
+  await q(`UPDATE requests SET enroute_at = COALESCE(enroute_at, NOW()), accepted_at = COALESCE(accepted_at, NOW()),
+           eta_minutes=$1, eta_set_at=NOW() WHERE id=$2`, [eta, r.id]);
+  const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
+  const p = await one('SELECT name FROM providers WHERE user_id=$1', [companyIdOf(req.user)]);
+  if (d) {
+    await sms(d.id, d.phone, `RIGRX: ${p?.name || 'Your provider'} is on the way — about ${eta} min out.`);
+    wsPush(d.id, 'job_status', { request_id: r.id, state: 'enroute', eta_minutes: eta });
+  }
+  res.json({ ok: true });
+});
+
+// A delay the driver is told about is a very different experience to one they aren't.
+router.post('/jobs/:id/late', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, { techOnly: true });
+  if (!r) return res.status(404).json({ error: 'That job is not assigned to you' });
+  const eta = Math.max(1, Math.min(600, Number(req.body.eta_minutes) || 15));
+  await q('UPDATE requests SET eta_minutes=$1, eta_set_at=NOW() WHERE id=$2', [eta, r.id]);
+  const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
+  const p = await one('SELECT name FROM providers WHERE user_id=$1', [companyIdOf(req.user)]);
+  if (d) {
+    await sms(d.id, d.phone, `RIGRX: ${p?.name || 'Your provider'} updated their ETA — about ${eta} min out.`);
+    wsPush(d.id, 'job_status', { request_id: r.id, state: 'late', eta_minutes: eta });
+  }
+  res.json({ ok: true });
+});
+
+router.post('/jobs/:id/arrived', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, { techOnly: true });
+  if (!r) return res.status(404).json({ error: 'That job is not assigned to you' });
+  await q('UPDATE requests SET arrived_at = COALESCE(arrived_at, NOW()) WHERE id=$1', [r.id]);
+  wsPush(r.driver_id, 'job_status', { request_id: r.id, state: 'arrived' });
+  res.json({ ok: true });
+});
+
+router.post('/jobs/:id/complete', auth.requireRole('provider'), async (req, res) => {
+  const r = await jobFor(req, req.params.id, req.user.member_role === 'tech' ? { techOnly: true } : {});
+  if (!r) return res.status(404).json({ error: 'Not one of your jobs' });
+  await q(`UPDATE requests SET status='completed', completed_at = COALESCE(completed_at, NOW()),
+           arrived_at = COALESCE(arrived_at, NOW()) WHERE id=$1`, [r.id]);
+  const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
+  if (d) {
+    await sms(d.id, d.phone, 'RIGRX: Job marked complete. Tap to rate how it went — it takes 10 seconds.');
+    wsPush(d.id, 'job_status', { request_id: r.id, state: 'completed' });
+  }
+  res.json({ ok: true });
+});
+
+// A tech only ever sees what was handed to them.
+router.get('/tech/jobs', auth.requireRole('provider'), async (req, res) => {
+  const rows = await q(`
+    SELECT ${JOB_COLS}, u.name AS driver_name, u.phone AS driver_phone
+    FROM requests r JOIN users u ON u.id = r.driver_id
+    WHERE r.assigned_tech = $1
+    ORDER BY (r.completed_at IS NOT NULL), r.id DESC LIMIT 30`, [req.user.id]);
+  res.json(rows);
+});
+
+async function notifyDispatch(r, body) {
+  const people = await alertRecipients(r.selected_provider, null);
+  for (const person of people) {
+    await sms(person.id, person.phone, `RIGRX: ${body}`);
+    wsPush(person.id, 'job_bounced', { request_id: r.id });
+  }
+}
+
+// Nothing sits silently while a driver waits on a shoulder: an assignment nobody
+// accepted inside five minutes goes back to the queue and the dispatcher is told.
+async function sweepUnacceptedJobs() {
+  const stale = await q(`
+    UPDATE requests SET assigned_tech=NULL, assign_bounced=TRUE
+    WHERE status='selected' AND assigned_tech IS NOT NULL AND accepted_at IS NULL
+      AND assigned_at < NOW() - INTERVAL '5 minutes'
+    RETURNING id, selected_provider`);
+  for (const r of stale) {
+    await notifyDispatch(r, `Job #${r.id} was not accepted — it is back in your queue.`);
+  }
+  return stale.length;
+}
+
+/* ---------------- company people ---------------- */
+// Owner runs the account, dispatchers take alerts for their yard and hand work out,
+// techs only see the job they were given. Everyone signs in with their own phone.
+const MEMBER_ROLES = ['owner', 'dispatcher', 'tech'];
+
+router.get('/provider/members', requireDispatch, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const rows = await q(`
+    SELECT u.id, u.name, u.phone, u.member_role, u.assignable, u.member_location_id, u.archived_at,
+           u.created_at, l.label AS location_label
+    FROM users u
+    LEFT JOIN provider_locations l ON l.id = u.member_location_id
+    WHERE u.company_id = $1 ORDER BY
+      CASE u.member_role WHEN 'owner' THEN 0 WHEN 'dispatcher' THEN 1 ELSE 2 END, u.id`, [cid]);
+  res.json(rows);
+});
+
+router.post('/provider/members', requireOwner, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const phone = auth.normalizePhone(req.body.phone);
+  if (!phone) return res.status(400).json({ error: 'Enter a valid mobile number' });
+  const name = String(req.body.name || '').trim().slice(0, 80);
+  if (!name) return res.status(400).json({ error: 'Enter their name' });
+  const role = MEMBER_ROLES.includes(req.body.member_role) ? req.body.member_role : 'tech';
+  if (role === 'owner') return res.status(400).json({ error: 'There can only be one owner' });
+
+  const existing = await one('SELECT * FROM users WHERE phone=$1', [phone]);
+  if (existing && existing.company_id && existing.company_id !== cid)
+    return res.status(409).json({ error: 'That number already belongs to another company' });
+  if (existing && existing.role === 'driver' && !existing.company_id)
+    return res.status(409).json({ error: 'That number is already signed up as a driver' });
+
+  const locId = Number(req.body.member_location_id) || null;
+  const assignable = req.body.assignable !== false;   // techs are assignable by default
+  const u = existing
+    ? await one(`UPDATE users SET name=$1, role='provider', company_id=$2, member_role=$3,
+                 assignable=$4, member_location_id=$5, archived_at=NULL WHERE id=$6 RETURNING *`,
+                [name, cid, role, assignable, locId, existing.id])
+    : await one(`INSERT INTO users (phone, role, name, company_id, member_role, assignable, member_location_id)
+                 VALUES ($1,'provider',$2,$3,$4,$5,$6) RETURNING *`,
+                [phone, name, cid, role, assignable, locId]);
+
+  const company = await one('SELECT name FROM providers WHERE user_id=$1', [cid]);
+  await sms(u.id, u.phone,
+    `RIGRX: ${company?.name || 'Your company'} added you as ${role === 'tech' ? 'a technician' : 'a dispatcher'}. ` +
+    `Sign in with this number — no password needed. ${process.env.BASE_URL || ''}`);
+  res.json({ ok: true, member: { id: u.id, name: u.name, phone: u.phone, member_role: u.member_role } });
+});
+
+router.put('/provider/members/:id', requireOwner, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const m = await one('SELECT * FROM users WHERE id=$1 AND company_id=$2', [req.params.id, cid]);
+  if (!m) return res.status(404).json({ error: 'Not on your team' });
+  if (m.member_role === 'owner') return res.status(400).json({ error: 'The owner cannot be changed here' });
+  const role = MEMBER_ROLES.includes(req.body.member_role) && req.body.member_role !== 'owner'
+    ? req.body.member_role : m.member_role;
+  await q(`UPDATE users SET member_role=$1, assignable=$2, member_location_id=$3 WHERE id=$4`,
+    [role, req.body.assignable !== false,
+     req.body.member_location_id === null ? null : (Number(req.body.member_location_id) || null), m.id]);
+  res.json({ ok: true });
+});
+
+// Removing someone unhooks them from the company rather than deleting the person, so
+// any job they worked keeps its record. Their login stops working immediately.
+router.delete('/provider/members/:id', requireOwner, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const m = await one('SELECT * FROM users WHERE id=$1 AND company_id=$2', [req.params.id, cid]);
+  if (!m) return res.status(404).json({ error: 'Not on your team' });
+  if (m.member_role === 'owner') return res.status(400).json({ error: 'You cannot remove the owner' });
+  const openJobs = await q(`SELECT id FROM requests WHERE assigned_tech=$1 AND completed_at IS NULL
+    AND status IN ('selected')`, [m.id]);
+  await q(`UPDATE requests SET assigned_tech=NULL, assigned_at=NULL, accepted_at=NULL
+           WHERE assigned_tech=$1 AND completed_at IS NULL`, [m.id]);
+  await q(`UPDATE users SET archived_at=NOW(), archive_reason='Removed from company' WHERE id=$1`, [m.id]);
+  await auth.endAllSessions(m.id);
+  res.json({ ok: true, unassigned_jobs: openJobs.length });
 });
 
 /* ---------------- archive & restore ---------------- */
@@ -1088,3 +1351,4 @@ router.get('/admin/drivers/:id', auth.requireRole('admin'), async (req, res) => 
 });
 
 module.exports = router;
+module.exports.sweepUnacceptedJobs = sweepUnacceptedJobs;

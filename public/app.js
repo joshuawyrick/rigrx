@@ -62,7 +62,10 @@ function nav(view, extra){
 function homeFor(){
   if (!S.me) return 'signin';
   if (S.me.role === 'admin') return 'a-home';
-  if (S.me.role === 'provider') return (!S.provider || !S.provider.name) ? 'p-setup1' : 'p-feed';
+  if (S.me.role === 'provider') {
+    if (S.me.member_role === 'tech') return 't-jobs';
+    return (!S.provider || !S.provider.name) ? 'p-setup1' : 'p-feed';
+  }
   return !S.me.name ? 'd-setup1' : 'd-home';
 }
 
@@ -706,6 +709,45 @@ async function sendRequest(btn){
     nav('d-active', { activeRequestId: res.request.id });
   } catch(e){ btn.disabled = false; }
 }
+// The bit a stranded driver actually cares about: somebody is coming, and this is
+// when. The countdown ticks locally off the ETA the tech set, so it stays honest
+// without polling, and it turns red rather than negative once the ETA passes.
+function onTheWayCard(w){
+  if (!w) return '';
+  if (w.completed) return '';
+  if (w.arrived) return `
+    <div class="card" style="border-color:var(--red); background:var(--red-tint)">
+      <div class="row"><b class="mini k" style="font-size:15px">${ic('check',16)} ${esc(w.tech_name || w.company)} is on scene</b></div>
+      <div class="mini" style="margin-top:5px; color:#8c5057">${esc(w.company)}${w.tech_phone ? ' · ' + esc(w.tech_phone) : ''}</div>
+    </div>`;
+  const setAt = new Date(w.eta_set_at).getTime();
+  const left = Math.round((setAt + (w.eta_minutes || 0) * 60000 - Date.now()) / 60000);
+  const overdue = left < 0;
+  startEtaTicker();
+  return `
+  <div class="card" style="border-color:var(--red)">
+    <div class="row">
+      <div>
+        <b class="mini k" style="font-size:15px">${ic('truck',16)} ${esc(w.tech_name || w.company)} is on the way</b>
+        <div class="faint" style="margin-top:4px">${esc(w.company)}${w.tech_phone ? ` · <a href="tel:${esc(w.tech_phone)}" style="color:var(--red); font-weight:700">${esc(w.tech_phone)}</a>` : ''}</div>
+      </div>
+      <div style="text-align:right">
+        <div id="etaNum" style="font-size:30px; font-weight:800; letter-spacing:-1px; line-height:1; color:${overdue ? 'var(--red)' : 'var(--ink)'}">
+          ${overdue ? Math.abs(left) : Math.max(0, left)}</div>
+        <div class="faint" style="font-size:11px">${overdue ? 'min overdue' : 'min away'}</div>
+      </div>
+    </div>
+  </div>`;
+}
+let etaTimer = null;
+function startEtaTicker(){
+  if (etaTimer) return;
+  etaTimer = setInterval(() => {
+    if (S.view !== 'd-active') { clearInterval(etaTimer); etaTimer = null; return; }
+    render();
+  }, 30000);
+}
+
 async function vDActive(){
   const d = await api('GET', '/requests/' + S.activeRequestId);
   const r = d.request;
@@ -714,6 +756,7 @@ async function vDActive(){
   <button class="back" onclick="nav('d-home')">${ic('chevL',15)} Home</button>
   <h2 class="scr">${r.status==='open' ? 'Help is on the way' : 'Request #'+r.id}</h2>
   <p class="scrsub">Request #${r.id} · ${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} compan${r.notified_count===1?'y':'ies'} alerted</p>
+  ${onTheWayCard(d.on_the_way)}
   <div class="card">
     <div class="row"><span class="sec">Response Slots</span><span class="pill red">${filled ? filled + ' of 4 responded' : 'notifying…'}</span></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
@@ -1366,6 +1409,198 @@ async function vPMyLeads(){
     : f === 'open' ? 'Nothing open right now'
     : 'No leads purchased yet — check Live Leads'}</span></div>`}`;
 }
+/* ---------------- company people & jobs ---------------- */
+const memberRole = () => (S.me?.member_role || (S.me?.role === 'provider' ? 'owner' : ''));
+const isTech    = () => memberRole() === 'tech';
+const isOwner   = () => memberRole() === 'owner';
+
+const ROLE_LABEL = { owner: 'Owner', dispatcher: 'Dispatcher', tech: 'Technician' };
+
+async function vPPeople(){
+  const rows = await api('GET', '/provider/members');
+  const locs = S.provider?.locations || [];
+  const locOpts = ['<option value="">Any yard</option>'].concat(
+    locs.map(l=>`<option value="${l.id}">${esc(l.label || 'Yard ' + l.id)}</option>`)).join('');
+  return `
+  <h2 class="scr">Your team</h2>
+  <p class="scrsub">Everyone signs in with their own mobile number — no passwords to hand out or reset</p>
+  ${isOwner() ? `
+  <div class="card">
+    <span class="sec">Add someone</span>
+    <div class="grid2" style="margin-top:8px">
+      <div><label class="f" style="margin-top:0">Name</label><input type="text" id="mb-name" placeholder="Dale Prescott"></div>
+      <div><label class="f" style="margin-top:0">Mobile number</label><input type="tel" id="mb-phone" placeholder="(661) 555-0134"></div>
+    </div>
+    <div class="grid2">
+      <div><label class="f">Role</label>
+        <select id="mb-role">
+          <option value="tech">Technician — sees only the jobs you give them</option>
+          <option value="dispatcher">Dispatcher — gets lead alerts and hands work out</option>
+        </select></div>
+      <div><label class="f">Yard</label><select id="mb-loc">${locOpts}</select></div>
+    </div>
+    <div class="faint" style="margin:10px 0">A dispatcher tied to a yard is only alerted for leads near that yard. Leave it on "Any yard" to hear about everything.</div>
+    <button class="btn" onclick="addMember()">${ic('plus',16)} Add to team &amp; text them the link</button>
+  </div>` : ''}
+
+  ${rows.filter(m=>!m.archived_at).map(m=>`
+    <div class="card">
+      <div class="row"><div>
+        <b class="mini k">${esc(m.name || m.phone)}</b>
+        <span class="pill ${m.member_role==='owner'?'solid':m.member_role==='dispatcher'?'red':'gray'}" style="margin-left:6px">${ROLE_LABEL[m.member_role] || m.member_role}</span>
+        <div class="faint" style="margin-top:3px">${esc(m.phone)}${m.location_label ? ' · ' + esc(m.location_label) : ' · any yard'}${m.assignable ? ' · can be assigned jobs' : ''}</div>
+      </div>
+      ${isOwner() && m.member_role !== 'owner' ? `
+        <button class="btn ghost" style="width:auto; padding:9px 14px; font-size:12px" onclick="removeMember(${m.id},'${esc(m.name||m.phone).replace(/'/g,'')}')">Remove</button>` : ''}
+      </div>
+    </div>`).join('')}
+
+  <div class="card" style="background:var(--soft)">
+    <div class="mini" style="line-height:1.6">
+      <b class="k">Owner</b> runs the account — billing, coverage, services and this page.<br>
+      <b class="k">Dispatcher</b> gets the lead alerts for their yard, buys leads, talks to drivers and assigns jobs.<br>
+      <b class="k">Technician</b> sees only the jobs assigned to them — never the lead feed, never what anything cost.
+    </div>
+  </div>`;
+}
+async function addMember(){
+  const name = qv('mb-name').trim(), phone = qv('mb-phone').trim();
+  if (!name || !phone) return toast('Name and mobile number both needed');
+  await api('POST', '/provider/members', { name, phone,
+    member_role: $('mb-role').value, member_location_id: $('mb-loc').value || null });
+  toast(name + ' added — we texted them a sign-in link');
+  render();
+}
+async function removeMember(id, name){
+  if (!confirm(`Remove ${name} from your team?\n\nThey lose access immediately. Any job they had open goes back to your queue.`)) return;
+  const r = await api('DELETE', '/provider/members/' + id);
+  toast(r.unassigned_jobs ? `Removed — ${r.unassigned_jobs} job${r.unassigned_jobs===1?'':'s'} back in the queue` : 'Removed');
+  render();
+}
+
+/* ---------------- dispatcher: the job queue ---------------- */
+const jobState = j =>
+  j.completed_at ? { k:'done',    t:'COMPLETE',  c:'gray' }
+: j.arrived_at   ? { k:'arrived', t:'ON SCENE',  c:'solid' }
+: j.enroute_at   ? { k:'enroute', t:'ON THE WAY',c:'solid' }
+: j.accepted_at  ? { k:'accepted',t:'ACCEPTED',  c:'dark' }
+: j.assigned_tech? { k:'assigned',t:'WAITING TO ACCEPT', c:'red' }
+:                  { k:'new',     t:'NEEDS A TECH', c:'red' };
+
+async function vPJobs(){
+  const d = await api('GET', '/jobs');
+  const live = d.jobs.filter(j=>!j.completed_at), done = d.jobs.filter(j=>j.completed_at);
+  const techOpts = j => d.techs.map(t=>`<option value="${t.id}" ${t.id===j.assigned_tech?'selected':''}>${esc(t.name || t.phone)}</option>`).join('');
+  const card = j => {
+    const st = jobState(j);
+    return `
+    <div class="card ${st.k==='new'||j.assign_bounced ? 'alert' : ''}">
+      <div class="row"><div>
+        <b class="mini k">Job #${j.id} — ${esc(j.service_label)}</b>
+        <div class="faint" style="margin-top:3px">${esc(j.driver_name || 'Driver')} · ${esc(j.driver_phone||'')} · ${esc(j.area_label)} · won ${timeAgo(j.created_at)}</div>
+      </div><span class="pill ${st.c}">${st.t}</span></div>
+      ${j.assign_bounced && !j.assigned_tech ? `<div class="mini" style="color:var(--red); margin-top:7px">${ic('warn',13)} Nobody accepted this — it came back to you. Reassign it.</div>` : ''}
+      ${j.tech_name ? `<div class="mini" style="margin-top:7px">${ic('user',13)} ${esc(j.tech_name)}${j.eta_minutes && st.k==='enroute' ? ` · ETA ${j.eta_minutes} min` : ''}</div>` : ''}
+      ${!j.completed_at ? `
+      <div class="row" style="gap:8px; margin-top:10px; flex-wrap:wrap">
+        <select id="as-${j.id}" style="flex:1; min-width:150px">
+          <option value="">Assign to…</option>${techOpts(j)}
+        </select>
+        <button class="btn dark" style="width:auto; padding:11px 16px; font-size:13px" onclick="assignJob(${j.id})">
+          ${j.assigned_tech ? 'Reassign' : 'Assign'}</button>
+      </div>` : ''}
+    </div>`;
+  };
+  return `
+  <h2 class="scr">Jobs</h2>
+  <p class="scrsub">Work you won — assign it to someone and watch it move</p>
+  ${!d.techs.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} Nobody on your team can be assigned work yet. Add your techs in <a onclick="nav('p-people')">Your team</a>.</div></div>` : ''}
+  ${live.length ? live.map(card).join('') : '<div class="card" style="text-align:center"><span class="muted">No live jobs. Buy a lead and win it and it lands here.</span></div>'}
+  ${done.length ? `<div style="height:16px"></div><span class="sec">Completed (${done.length})</span>${done.map(card).join('')}` : ''}`;
+}
+async function assignJob(id){
+  const techId = $('as-' + id)?.value;
+  if (!techId) return toast('Pick someone first');
+  await api('POST', `/jobs/${id}/assign`, { tech_id: Number(techId) });
+  toast('Assigned — we texted them');
+  render();
+}
+
+/* ---------------- technician: one screen, only their work ---------------- */
+async function vTechJobs(){
+  const rows = await api('GET', '/tech/jobs');
+  const live = rows.filter(j=>!j.completed_at), done = rows.filter(j=>j.completed_at);
+  const card = j => {
+    const st = jobState(j);
+    const tp = j.tire_position;
+    return `
+    <div class="card">
+      <div class="row"><div><b class="mini k">${esc(j.service_label)}</b>
+        <div class="faint" style="margin-top:3px">${esc(j.area_label)}</div></div>
+        <span class="pill ${st.c}">${st.t}</span></div>
+
+      ${!j.accepted_at ? `
+        <div class="mini" style="margin:10px 0">${esc(j.duty_class === 'medium' ? 'Medium duty' : j.duty_class === 'light' ? 'Light duty' : 'Heavy duty')} · ${esc(j.truck?.make || '')} ${esc(j.truck?.model || '')}</div>
+        <div class="row" style="gap:8px">
+          <button class="btn" onclick="jobAction(${j.id},'accept')">${ic('check',16)} Accept this job</button>
+          <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobAction(${j.id},'decline')">Can't take it</button>
+        </div>` : `
+        <div class="mini listline" style="margin:10px 0; line-height:1.9">
+          <span class="muted">Driver</span> &nbsp;<b class="k">${esc(j.driver_name || '')}</b> ·
+            <a href="tel:${esc(j.driver_phone||'')}" style="color:var(--red); font-weight:700">${esc(j.driver_phone||'')}</a><br>
+          <span class="muted">Where</span> &nbsp;${esc(j.landmark || j.area_label)}<br>
+          <span class="muted">Problem</span> &nbsp;${esc(j.description || j.service_label)}<br>
+          ${tp ? `<span class="muted">Tire</span> &nbsp;<b class="k" style="color:var(--red)">${esc([tp.axle, tp.side, tp.position].filter(x=>x&&x!=='Single').join(' · '))}</b>${tp.size ? ' — ' + esc(tp.size) : ''}<br>` : ''}
+          <span class="muted">Rig</span> &nbsp;${esc(j.truck?.year||'')} ${esc(j.truck?.make||'')} ${esc(j.truck?.model||'')}${j.trailer?.type ? ' + ' + esc(j.trailer.type) : ''}${j.trailer?.hazmat ? ' <span style="color:var(--red); font-weight:700">(HAZMAT)</span>' : ''}
+        </div>
+        <a class="btn dark" style="display:block; text-align:center; text-decoration:none; margin-bottom:8px"
+           href="https://www.google.com/maps/dir/?api=1&destination=${j.lat},${j.lng}" target="_blank" rel="noopener">
+           ${ic('pin',16)} Get directions</a>
+        ${!j.enroute_at ? `
+          <div class="row" style="gap:8px">
+            <input type="number" id="eta-${j.id}" placeholder="ETA min" value="30" style="width:110px">
+            <button class="btn" onclick="jobEnroute(${j.id})">${ic('truck',16)} On my way</button>
+          </div>`
+        : !j.arrived_at ? `
+          <div class="mini" style="margin-bottom:8px">${ic('clock',13)} Driver is expecting you in about ${j.eta_minutes} min</div>
+          <div class="row" style="gap:8px">
+            <button class="btn" onclick="jobAction(${j.id},'arrived')">${ic('check',16)} I've arrived</button>
+            <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobLate(${j.id})">Running late</button>
+          </div>`
+        : `<button class="btn" onclick="jobAction(${j.id},'complete')">${ic('check',16)} Job complete</button>`}
+      `}
+    </div>`;
+  };
+  return `
+  <h2 class="scr">My jobs</h2>
+  <p class="scrsub">${live.length ? 'Tap Accept, then keep the driver posted' : 'Nothing assigned right now'}</p>
+  ${live.map(card).join('') || '<div class="card" style="text-align:center"><span class="muted">No jobs assigned to you yet. Your dispatcher will send one over — you\'ll get a text.</span></div>'}
+  ${done.length ? `<div style="height:16px"></div><span class="sec">Finished (${done.length})</span>
+    ${done.slice(0,10).map(j=>`<div class="card"><div class="row"><div><b class="mini k">${esc(j.service_label)}</b>
+      <div class="faint">${esc(j.area_label)} · ${timeAgo(j.completed_at)}</div></div>
+      <span class="pill gray">COMPLETE</span></div></div>`).join('')}` : ''}`;
+}
+async function jobAction(id, action){
+  if (action === 'decline' && !confirm("Hand this job back to your dispatcher?")) return;
+  await api('POST', `/jobs/${id}/${action}`);
+  toast({ accept:'Accepted', decline:'Sent back to dispatch', arrived:'Driver has been told you arrived',
+          complete:'Job closed — the driver has been asked to rate you' }[action] || 'Done');
+  render();
+}
+async function jobEnroute(id){
+  const eta = Number(qv('eta-' + id)) || 30;
+  await api('POST', `/jobs/${id}/enroute`, { eta_minutes: eta });
+  toast('Driver notified — they can see your ETA counting down');
+  render();
+}
+async function jobLate(id){
+  const mins = prompt('How many more minutes?', '15');
+  if (mins === null) return;
+  await api('POST', `/jobs/${id}/late`, { eta_minutes: Number(mins) || 15 });
+  toast('Driver has been updated');
+  render();
+}
+
 async function vPStats(){
   const s = await api('GET', '/provider/stats');
   const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -2076,7 +2311,7 @@ const VIEWS = {
   'd-pubprofile': vDPubProfile, 'd-rate': vDRate, 'd-garage': vDGarage,
   'p-setup1': vPSetup1, 'p-setup2': vPSetup2, 'p-setup3': vPSetup3, 'p-setup4': vPSetup4, 'p-setup5': vPSetup5,
   'p-feed': vPFeed, 'p-lead': vPLead, 'p-myleads': vPMyLeads, 'p-chat': ()=>chatView('p-threads'), 'p-threads': vThreads,
-  'p-stats': vPStats, 'p-reviews': vPReviews, 'p-settings': vPSettings,
+  'p-stats': vPStats, 'p-reviews': vPReviews, 'p-people': vPPeople, 'p-jobs': vPJobs, 't-jobs': vTechJobs, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
   'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-catalog': vACatalog, 'a-requests': vARequests, 'a-request': vARequest,
   'a-drivers': vADrivers, 'a-driver': vADriver
@@ -2089,10 +2324,15 @@ const NAVS = {
     {ico:'truck', label:'Garage', v:'d-garage'}],
   provider: [
     {ico:'zap', label:'Live Leads', v:'p-feed', also:['p-lead']},
+    {ico:'wrench', label:'Jobs', v:'p-jobs'},
     {ico:'folder', label:'My Leads', v:'p-myleads'},
     {ico:'chat', label:'Messages', v:'p-threads', also:['p-chat']},
     {ico:'chart', label:'Stats', v:'p-stats', also:['p-reviews']},
+    {ico:'user', label:'Your team', v:'p-people'},
     {ico:'sliders', label:'Settings', v:'p-settings'}],
+  // A tech gets one screen and nothing else — no feed, no prices, no other jobs.
+  tech: [
+    {ico:'wrench', label:'My jobs', v:'t-jobs'}],
   admin: [
     {ico:'home', label:'Overview', v:'a-home'},
     {ico:'check', label:'Providers', v:'a-providers', also:['a-provider']},
@@ -2114,9 +2354,15 @@ async function render(){
   catch(e){ console.error(e); html = `<div class="card alert" style="margin-top:20px"><div class="mini">Couldn't load this page — check your connection and try again.</div></div>`; }
   if (seq !== renderSeq) return; // a newer navigation happened while loading
   if (AUTH_LAYOUT.has(S.view) || !S.me){ root.innerHTML = AUTH_LAYOUT.has(S.view) ? html : authShell(html); return; }
-  const items = (NAVS[S.me.role] || NAVS.driver).map(t => ({ ...t, act: t.v === S.view || (t.also || []).includes(S.view) }));
+  const navKey = S.me.role === 'provider' && (S.me.member_role === 'tech') ? 'tech' : S.me.role;
+  const items = (NAVS[navKey] || NAVS.driver)
+    .filter(t => !(t.v === 'p-settings' && S.me.member_role === 'dispatcher'))
+    .map(t => ({ ...t, act: t.v === S.view || (t.also || []).includes(S.view) }));
   const who = S.me.role === 'provider'
-    ? `${esc(S.provider?.name || S.me.name || 'My company')}<br><span class="faint">${S.provider?.approved ? 'Verified provider' : 'Pending approval'}</span>`
+    ? `${esc(S.provider?.name || S.me.name || 'My company')}<br><span class="faint">${
+        S.me.member_role === 'tech' ? esc(S.me.name || 'Technician') + ' · technician'
+        : S.me.member_role === 'dispatcher' ? esc(S.me.name || '') + ' · dispatcher'
+        : (S.provider?.approved ? 'Verified provider' : 'Pending approval')}</span>`
     : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? 'RIGRX admin' : 'Driver · ' + esc(S.me.phone)}</span>`;
   root.innerHTML = `
   <div class="shell">

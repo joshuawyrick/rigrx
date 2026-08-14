@@ -77,6 +77,11 @@ wss.on('connection', async (socket, req) => {
   } catch (e) { socket.close(); }
 });
 
+// Every minute, hand back any job a tech was given but never accepted.
+setInterval(() => {
+  routes.sweepUnacceptedJobs?.().catch(e => console.error('job sweep failed:', e.message));
+}, 60 * 1000).unref();
+
 const PORT = process.env.PORT || 3000;
 const { seedIfEmpty, seedTradesIfEmpty } = require('./catalog');
 migrate().then(seedIfEmpty).then(seedTradesIfEmpty).then(() => {

@@ -158,6 +158,34 @@ Losing bidders keep the contact info and chat they paid for (so there is no refu
 
 Choosing a provider is irreversible, so it goes through a confirmation dialog that spells out the consequences, and **Chat first** is styled as the primary action on every responder card.
 
+## Your team: owner, dispatcher, technician
+
+A service company is more than one login. **Your team** (owner only) adds people by name and mobile number — they get a text with a sign-in link and use their own phone number, same as everyone else. No passwords to hand out, reset, or leak, and the one credential a tech always has on a call is the phone in their pocket.
+
+| Role | Can do |
+|---|---|
+| **Owner** | Everything — billing, coverage, services, and the only one who can add or remove people |
+| **Dispatcher** | Gets the lead alerts for their yard, buys leads, talks to drivers, assigns jobs. Cannot change company settings |
+| **Technician** | Sees only the jobs assigned to them. Never the lead feed, never prices, never other jobs |
+
+A dispatcher can be tied to a specific yard, in which case they're only alerted for leads that matched that yard — a Bakersfield dispatcher isn't woken at 3 AM for a Fresno breakdown. Leave it on "any yard" to hear everything. Owners and dispatchers are both assignable by default, because in a two-person shop the owner *is* the tech and shouldn't need a second account.
+
+Techs are free and unlimited.
+
+## From won lead to finished job
+
+A lead used to end when the driver picked you. Now that's where the job starts:
+
+1. **Won** — sits unassigned in the dispatcher's **Jobs** queue
+2. **Assigned** — dispatcher picks someone; they get a text
+3. **Accepted** — or declined, which hands it straight back. **If nobody accepts within five minutes it returns to the queue automatically and the dispatcher is texted**, because a job sitting silently is the exact failure this is meant to prevent
+4. **On my way** — the tech enters an ETA. This is the payoff: the driver's screen now shows *"Dale Prescott is on the way — 25 min away"* with a countdown that ticks down live and turns red if it runs over. **Running late** updates it
+5. **Arrived**, then **Complete** — which triggers the driver's rating prompt
+
+Every step is timestamped, which is where response-time data comes from — assigned to accepted, accepted to rolling, rolling to on-scene. Nobody in this industry publishes those numbers.
+
+The technician's screen is deliberately spare: the driver's name and a tappable phone number, the exact spot, the fault, the failed tire position, the rig and its hazmat status, and a **Get directions** button that hands off to their own nav app rather than routing trucks itself.
+
 ## The company scoreboard
 
 **Stats** works the same way the admin Overview does — every number opens the data behind it:
