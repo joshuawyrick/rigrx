@@ -204,8 +204,24 @@ const forClass = (map, cls) => (map || {})[cls || 'heavy'] || [];
 /* ---------------- driver setup (first sign-in) ---------------- */
 function progress(step, total){ return `<div class="progress">${Array.from({length: total},(_,i)=>`<i class="${i<step?'on':''}"></i>`).join('')}</div>`; }
 
+
+/* ---------------- setup navigation ---------------- */
+// The setup screens run without the sidebar or tab bar, so they need their own way
+// out. Someone already set up who is editing a rig should land back where they came
+// from, not be walked backwards into the first-run welcome screen with no exit.
+const isSetUpDriver = () => !!(S.me && S.me.name);
+const isSetUpProvider = () => !!(S.provider && S.provider.name);
+function setupTop(backView, backLabel, homeView){
+  return `
+  <div class="row" style="align-items:center; margin:0 0 18px">
+    ${backView ? `<button class="back" style="margin:0" onclick="nav('${backView}')">${ic('chevL',15)} ${backLabel || 'Back'}</button>` : '<span></span>'}
+    ${homeView ? `<button class="back" style="margin:0" onclick="nav('${homeView}')">${ic('home',15)} Done — go home</button>` : ''}
+  </div>`;
+}
+
 function vDSetup1(){
   return authShell(`
+  ${isSetUpDriver() ? setupTop(null, null, 'd-home') : ''}
   ${progress(1,3)}
   <h2 class="scr">Welcome — let's set you up</h2>
   <p class="scrsub">Step 1 of 3 · about 2 minutes. Broke down right now? <a onclick="nav('d-home')">Skip, request help first</a></p>
@@ -305,20 +321,24 @@ function readTruckForm(){
 function vDSetup2(){
   if (S.editTruck?.duty) S.dutyClass = S.editTruck.duty;
   return authShell(`
-  <button class="back" onclick="nav('d-setup1')">${ic('chevL',15)} Back</button>
+  ${isSetUpDriver()
+    ? setupTop('d-garage', 'My Garage', 'd-home')
+    : setupTop('d-setup1', 'Back')}
   ${progress(2,3)}
   <h2 class="scr">Add your truck</h2>
   <p class="scrsub">Step 2 of 3 — every detail here saves a question at 2 AM</p>
   ${truckForm(S.editTruck || {})}
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveDSetup2()">Continue ${ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="saveDSetup2()">${isSetUpDriver() ? ic('check',16) + ' Save truck' : 'Continue ' + ic('arrowR',15)}</button>`);
 }
 async function saveDSetup2(){
   const data = readTruckForm();
   if (!data.make) return toast('At least enter the make');
+  const wasSetUp = isSetUpDriver();
   if (S.editTruck?.id) await api('PUT', '/trucks/' + S.editTruck.id, { data });
   else await api('POST', '/trucks', { data });
   await loadMe();
+  if (wasSetUp) { toast('Truck saved'); S.editTruck = null; return nav('d-garage'); }
   nav('d-setup3');
 }
 function trailerForm(r = {}){
@@ -363,23 +383,27 @@ function readTrailerForm(){
 }
 function vDSetup3(){
   return authShell(`
-  <button class="back" onclick="nav('d-setup2')">${ic('chevL',15)} Back</button>
+  ${isSetUpDriver()
+    ? setupTop('d-garage', 'My Garage', 'd-home')
+    : setupTop('d-setup2', 'Back')}
   ${progress(3,3)}
   <h2 class="scr">Add your trailer</h2>
   <p class="scrsub">Step 3 of 3 — you can add more rigs anytime in My Garage</p>
   ${trailerForm(S.editTrailer || {})}
   <div style="height:8px"></div>
-  <button class="btn" onclick="saveDSetup3()">${ic('check',16)} Finish — go to my dashboard</button>
+  <button class="btn" onclick="saveDSetup3()">${ic('check',16)} ${isSetUpDriver() ? 'Save trailer' : 'Finish — go to my dashboard'}</button>
   <div style="height:8px"></div>
-  <button class="btn ghost" onclick="nav('d-home')">Skip — no trailer / bobtail</button>`);
+  <button class="btn ghost" onclick="nav(isSetUpDriver() ? 'd-garage' : 'd-home')">${isSetUpDriver() ? 'Cancel' : 'Skip — no trailer / bobtail'}</button>`);
 }
 async function saveDSetup3(){
   const data = readTrailerForm();
+  const wasSetUp = isSetUpDriver();
   if (data.type && !/bobtail/i.test(data.type)){
     if (S.editTrailer?.id) await api('PUT', '/trailers/' + S.editTrailer.id, { data });
     else await api('POST', '/trailers', { data });
   }
   await loadMe();
+  if (wasSetUp) { toast('Trailer saved'); S.editTrailer = null; return nav('d-garage'); }
   toast('Profile complete — your garage is ready');
   nav('d-home');
 }
@@ -838,6 +862,18 @@ async function submitReview(){
   toast('Thanks — your review is live on their profile');
   nav('d-home');
 }
+// Removing a rig only affects the garage. Requests already sent keep their own
+// snapshot of the truck, so deleting one never rewrites past history.
+async function removeTruck(id, label){
+  if (!confirm(`Remove ${label || 'this truck'} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.`)) return;
+  await api('DELETE', '/trucks/' + id);
+  await loadMe(); toast('Truck removed'); render();
+}
+async function removeTrailer(id, label){
+  if (!confirm(`Remove ${label || 'this trailer'} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.`)) return;
+  await api('DELETE', '/trailers/' + id);
+  await loadMe(); toast('Trailer removed'); render();
+}
 async function vDGarage(){
   return `
   <h2 class="scr">My Garage</h2>
@@ -845,13 +881,19 @@ async function vDGarage(){
   <div class="cols2"><div>
   ${S.trucks.map(x=>`<div class="card">
     <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} ${esc(x.data.unit) ? 'Unit '+esc(x.data.unit)+' — ' : ''}${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)} ${dutyPill(x.data.duty)}</b>
-      <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} Edit</span></div>
+      <span style="display:inline-flex; gap:12px">
+        <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} Edit</span>
+        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTruck(${x.id}, "${esc((x.data.year||"") + " " + (x.data.make||"") + " " + (x.data.model||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} Delete</span>
+      </span></div>
     <div class="faint" style="margin-top:7px; line-height:1.7">Engine: ${esc(x.data.engine)} · ${esc(x.data.trans)} · ${esc(x.data.axles)}<br>Tires: ${esc(x.data.steer)} / ${esc(x.data.drive)} · ${esc(x.data.wheels)}</div>
   </div>`).join('') || '<div class="card"><a onclick="S.editTruck=null; nav(\'d-setup2\')">+ Add your truck</a></div>'}
   </div><div>
   ${S.trailers.map(x=>`<div class="card">
     <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('trailer')} Trailer ${esc(x.data.num)} — ${esc(x.data.type)}</b>
-      <span class="faint" style="cursor:pointer" onclick='S.editTrailer={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup3")'>${ic('edit',13)} Edit</span></div>
+      <span style="display:inline-flex; gap:12px">
+        <span class="faint" style="cursor:pointer" onclick='S.editTrailer={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup3")'>${ic('edit',13)} Edit</span>
+        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTrailer(${x.id}, "${esc((x.data.type||"trailer") + " " + (x.data.num||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} Delete</span>
+      </span></div>
     <div class="faint" style="margin-top:7px; line-height:1.7">${esc(x.data.len)} · ${esc(x.data.axles)} · Tires: ${esc(x.data.tires)}<br>${x.data.hazmat ? 'Hazmat: Class '+esc(x.data.hzClass)+' · UN '+esc(x.data.un) : 'No hazmat'}</div>
   </div>`).join('') || '<div class="card"><a onclick="S.editTrailer=null; nav(\'d-setup3\')">+ Add your trailer</a></div>'}
   </div></div>
@@ -957,6 +999,7 @@ const CAPS = [
 function vPSetup1(){
   const p = S.provider || {};
   return authShell(`
+  ${isSetUpProvider() ? setupTop(null, null, 'p-settings') : ''}
   ${progress(1,5)}
   <h2 class="scr">Tell us about your company</h2>
   <p class="scrsub">Step 1 of 5 · leads start the day you're approved</p>
@@ -982,7 +1025,9 @@ async function savePSetup1(){
 function vPSetup2(){
   const locs = S.provider?.locations || [];
   return authShell(`
-  <button class="back" onclick="nav('p-setup1')">${ic('chevL',15)} Back</button>
+  ${isSetUpProvider()
+    ? setupTop('p-settings', 'Settings', 'p-feed')
+    : setupTop('p-setup1', 'Back')}
   ${progress(2,5)}
   <h2 class="scr">Locations & coverage</h2>
   <p class="scrsub">Step 2 of 5 — you get every lead inside ANY location's radius</p>
@@ -1021,7 +1066,9 @@ async function delLocation(id){
 function vPSetup3(){
   const services = S.provider?.services || {};
   return authShell(`
-  <button class="back" onclick="nav('p-setup2')">${ic('chevL',15)} Back</button>
+  ${isSetUpProvider()
+    ? setupTop('p-settings', 'Settings', 'p-feed')
+    : setupTop('p-setup2', 'Back')}
   ${progress(3,5)}
   <h2 class="scr">What services do you offer?</h2>
   <p class="scrsub">Step 3 of 5 — start with what kind of shop you are, then adjust. More boxes = more leads; your rating keeps it honest.</p>
@@ -1077,7 +1124,9 @@ function vPSetup4(){
   const e = S.provider?.equipment || {};
   const c = S.provider?.capabilities || {};
   return authShell(`
-  <button class="back" onclick="nav('p-setup3')">${ic('chevL',15)} Back</button>
+  ${isSetUpProvider()
+    ? setupTop('p-settings', 'Settings', 'p-feed')
+    : setupTop('p-setup3', 'Back')}
   ${progress(4,5)}
   <h2 class="scr">Equipment & capacity</h2>
   <p class="scrsub">Step 4 of 5 — drivers see this as proof you can handle the job</p>
@@ -1126,7 +1175,9 @@ async function savePSetup4(){
 function vPSetup5(){
   const v = S.provider?.verification || {};
   return authShell(`
-  <button class="back" onclick="nav('p-setup4')">${ic('chevL',15)} Back</button>
+  ${isSetUpProvider()
+    ? setupTop('p-settings', 'Settings', 'p-feed')
+    : setupTop('p-setup4', 'Back')}
   ${progress(5,5)}
   <h2 class="scr">Verification & billing</h2>
   <p class="scrsub">Step 5 of 5 — drivers trust RIGRX because every company is vetted</p>

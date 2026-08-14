@@ -171,6 +171,12 @@ Choosing a provider is irreversible, so it goes through a confirmation dialog th
 
 The last two are deliberate. Speed and price are what win these jobs, and a company that can see it takes eleven minutes to answer — while its competitors answer in two — has something to act on. A short panel next to the chart explains each number in plain language, because most of these owners have never used a dashboard.
 
+## Editing and removing saved equipment
+
+Trucks and trailers can be removed from **My Garage** — each card has Edit and Delete. Deleting only affects the garage: requests already sent keep their own snapshot of the rig, so removing a truck never rewrites what a provider saw or paid for.
+
+The setup screens run without the sidebar or tab bar, which means they need their own way out. They now adapt to who's on them: a brand-new driver walking through onboarding still gets Back through the steps, while someone already set up who is editing a rig gets **My Garage** and **Done — go home**, saves with a button that says *Save truck* rather than *Continue*, and lands back in the garage instead of being walked on to the next onboarding step. Service company setup screens do the same, returning to Settings.
+
 ## Archiving accounts (and why there is no delete)
 
 Every table hangs off `users` with `ON DELETE CASCADE`, so deleting an account would take its requests with it, and those requests would take the **purchases other companies paid for** with them. A single delete would remove leads a shop bought and quietly shrink your revenue history. So RIGRX has no delete button anywhere. It has archive.
