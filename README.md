@@ -27,6 +27,14 @@ Built with Node.js + Express + PostgreSQL + WebSockets. No build step — deploy
 - **Service company** — builds a profile (multiple locations each with its own radius, full service checklist + custom services, equipment, license/COI uploads), waits for your approval, then gets lead alerts and buys leads.
 - **Admin (you)** — the phone number in the `ADMIN_PHONE` secret gets the admin panel on sign-in: provider review & approval, license verification, lead pricing, refunds, custom-service approvals, marketplace metrics.
 
+## Why phone sign-in, and no Google button
+
+The phone number is not just the login — it is the product. Drivers are texted when a company responds, companies are texted when a lead drops, techs are texted when a job is assigned. A Google sign-in would hand us an email address and no phone number, so we would have to ask for the phone anyway. It adds a step rather than removing one.
+
+Phone verification also proves the thing that matters: that this person controls the number we are about to send work to. And a tech on a shared work phone signs in as themselves rather than as whoever's Google account is on the handset.
+
+The friction worth removing was the code entry, not the login method. The code field is marked `autocomplete="one-time-code"`, so iOS and Android offer the texted code as a one-tap suggestion above the keyboard, and it submits itself the moment six digits land — no button to hunt for. The phone field uses `type="tel"` so the keypad comes up instead of the full keyboard. Sessions last 30 days, so most people rarely see either screen.
+
 ## Approval vs. license verification (two separate switches)
 
 | Switch | What it controls | Who can be it |

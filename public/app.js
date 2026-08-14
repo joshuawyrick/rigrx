@@ -110,7 +110,8 @@ function vSignin(){
   <div class="card" style="padding:20px">
     <span class="sec">Sign in or create an account</span>
     <label class="f">Mobile number</label>
-    <input type="text" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel">
+    <input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel"
+      inputmode="tel" enterkeyhint="go" onkeydown="if(event.key==='Enter')sendCode()">
     <label class="f">I am a…</label>
     <div class="chips" id="si-role">
       <span class="chip sel" onclick="togOne(this)">Truck driver</span>
@@ -136,8 +137,9 @@ function vCode(){
     <span class="sec">Enter the code we texted you</span>
     <div style="margin:18px 0 6px">
       <input type="text" id="si-code" inputmode="numeric" maxlength="6" placeholder="••••••"
+        autocomplete="one-time-code" enterkeyhint="go" autofocus
         style="width:180px; text-align:center; font-size:24px; font-weight:800; letter-spacing:8px"
-        onkeydown="if(event.key==='Enter')verifyCode()">
+        oninput="onCodeInput(this)" onkeydown="if(event.key==='Enter')verifyCode()">
     </div>
     <div class="faint">Sent to ${esc(S.pendingPhone)} · <a onclick="requestCodeAgain()">Resend</a></div>
     ${S.devCode ? `<div class="card alert" style="margin-top:14px"><div class="mini">${ic('zap',13)} <b class="k">Test mode</b> (no Twilio keys yet) — your code is <b class="k" style="letter-spacing:3px">${esc(S.devCode)}</b></div></div>` : ''}
@@ -148,6 +150,11 @@ function vCode(){
 async function requestCodeAgain(){
   const d = await api('POST', '/auth/request-code', { phone: S.pendingPhone });
   S.devCode = d.devCode || null; toast('Code re-sent'); render();
+}
+function onCodeInput(el){
+  const digits = el.value.replace(/\D/g, '').slice(0, 6);
+  if (el.value !== digits) el.value = digits;
+  if (digits.length === 6) { el.blur(); verifyCode(); }
 }
 async function verifyCode(){
   const code = qv('si-code').trim();
