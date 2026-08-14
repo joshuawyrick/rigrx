@@ -34,7 +34,7 @@ const qv = id => { const el = $(id); return el ? el.value : ''; };
 const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
-  activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null,
+  activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null, leadFilter: '',
   leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy'
 };
 async function loadCatalog(){
@@ -1289,14 +1289,31 @@ async function buyLead(btn){
 }
 async function vPMyLeads(){
   const rows = await api('GET', '/myleads');
+  const f = S.leadFilter || '';
+  const shown = f === 'won' ? rows.filter(x => x.won)
+              : f === 'open' ? rows.filter(x => x.request_status === 'open' && !x.won)
+              : rows;
+  const spent = shown.filter(x=>!x.refunded).reduce((a,x)=>a+x.amount_cents, 0);
+  const heads = { '': ['My Leads', "Everything you've purchased"],
+                  'won': ['Jobs won', 'Leads where the driver chose you'],
+                  'open': ['Still open', "Leads the driver hasn't chosen anyone for yet — chase these"],
+                  'spend': ['Lead spend', 'Every purchase, newest first'] };
+  const h = heads[f] || heads[''];
   return `
-  <h2 class="scr">My Leads</h2>
-  <p class="scrsub">Everything you've purchased</p>
-  ${rows.map(x=>`<div class="card click" onclick="nav('p-lead',{leadId:${x.request_id}})">
+  ${f ? `<button class="back" onclick="nav('p-stats')">${ic('chevL',15)} Stats</button>` : ''}
+  <h2 class="scr">${h[0]}</h2>
+  <p class="scrsub">${h[1]}</p>
+  ${f ? `<div class="tiles"><div class="tile"><div class="l">Showing</div><div class="v">${shown.length}</div>
+      <div class="d">of ${rows.length} lead${rows.length===1?'':'s'} bought</div></div>
+    <div class="tile"><div class="l">Spent on these</div><div class="v">${fmt$(spent)}</div></div></div>` : ''}
+  ${shown.map(x=>`<div class="card click" onclick="nav('p-lead',{leadId:${x.request_id}})">
     <div class="row"><div><b class="mini k">Lead #${x.request_id} — ${esc(x.service_label)}</b>
       <div class="faint">${esc(x.area_label)} · bought ${timeAgo(x.created_at)} · ${fmt$(x.amount_cents)}${x.premium ? ' (premium)' : ''}${x.refunded ? ' · REFUNDED' : ''}</div></div>
     <span class="pill ${x.won ? 'solid' : x.request_status==='open' ? 'red' : 'gray'}">${x.won ? 'WON' : esc(x.request_status)}</span></div>
-  </div>`).join('') || '<div class="card" style="text-align:center"><span class="muted">No leads purchased yet — check Live Leads</span></div>'}`;
+  </div>`).join('') || `<div class="card" style="text-align:center"><span class="muted">${
+      f === 'won' ? "No wins yet — chat fast and quote clearly, that's what gets you chosen"
+    : f === 'open' ? 'Nothing open right now'
+    : 'No leads purchased yet — check Live Leads'}</span></div>`}`;
 }
 async function vPStats(){
   const s = await api('GET', '/provider/stats');
@@ -1307,17 +1324,86 @@ async function vPStats(){
   <h2 class="scr">${esc(S.provider?.name || 'My Company')}</h2>
   <p class="scrsub">Performance on RIGRX</p>
   <div class="tiles">
-    <div class="tile"><div class="l">Leads bought</div><div class="v">${s.leads_bought}</div></div>
-    <div class="tile"><div class="l">Jobs won</div><div class="v">${s.jobs_won}</div><div class="d">${s.win_rate}% win rate</div></div>
-    <div class="tile"><div class="l">Lead spend</div><div class="v">${fmt$(s.spend_cents)}</div></div>
-    <div class="tile"><div class="l">Driver rating</div><div class="v">${s.rating ?? '—'}</div><div class="d">${s.rating_count} review${s.rating_count===1?'':'s'}</div></div>
+    ${pTile('Leads bought', s.leads_bought, 'tap for the list', "'p-myleads'", "{leadFilter:''}")}
+    ${pTile('Jobs won', s.jobs_won, s.win_rate + '% win rate', "'p-myleads'", "{leadFilter:'won'}")}
+    ${pTile('Lead spend', fmt$(s.spend_cents), 'every purchase', "'p-myleads'", "{leadFilter:'spend'}")}
+    ${pTile('Your rating', s.rating ?? '—', `${s.rating_count} review${s.rating_count===1?'':'s'} from drivers`, "'p-reviews'")}
+    ${pTile('Cost per job won', s.cost_per_win_cents == null ? '—' : fmt$(s.cost_per_win_cents),
+        s.cost_per_win_cents == null ? 'win one to see this' : 'lead spend per job you won', "'p-myleads'", "{leadFilter:'won'}")}
+    ${pTile('Avg reply time', s.avg_reply_mins == null ? '—' : s.avg_reply_mins + ' min',
+        s.never_replied ? s.never_replied + ' bought but never messaged' : 'from buying to first message', "'p-myleads'", "{leadFilter:''}")}
   </div>
-  <div class="card" style="max-width:520px">
+  <div class="cols2"><div>
+  <div class="card">
     <span class="sec">Leads bought — last 7 days</span>
     <div class="bars7">
       ${week.map(w=>`<div class="b"><span class="val">${w[1]||''}</span><div class="bar" style="height:${Math.round(w[1]/max*100)}%"></div><span class="lb">${w[0]}</span></div>`).join('')}
     </div>
+  </div></div><div>
+  <div class="card">
+    <span class="sec">What these numbers mean</span>
+    <div class="mini listline" style="margin-top:8px; line-height:1.9">
+      <span class="muted">Win rate</span> &nbsp;How often the driver picked you after you bought. Chatting first and quoting a clear ETA is what moves this.<br>
+      <span class="muted">Cost per job won</span> &nbsp;Total lead spend divided by jobs won. Compare it to what an average job is worth to you — that's whether RIGRX pays.<br>
+      <span class="muted">Avg reply time</span> &nbsp;How long you take to message the driver after buying. The first company to respond wins most of the time.
+    </div>
+  </div></div></div>`;
+}
+// Same clickable tile the admin dashboard uses, so every number opens its data.
+function pTile(label, value, sub, view, extra){
+  return `
+  <div class="tile click" onclick="nav(${view}${extra ? ',' + extra : ''})">
+    <div class="row"><div class="l">${label}</div><span style="color:var(--faint)">${ic('arrowR',13)}</span></div>
+    <div class="v">${value}</div>${sub ? `<div class="d">${sub}</div>` : ''}
   </div>`;
+}
+async function vPReviews(){
+  const d = await api('GET', '/provider/reviews');
+  const total = d.reviews.length;
+  const avg = total ? (d.reviews.reduce((a,r)=>a+r.stars,0)/total).toFixed(1) : null;
+  const countFor = n => d.breakdown.find(b=>b.stars===n)?.n || 0;
+  const tagCounts = {};
+  d.reviews.forEach(r => (r.tags||[]).forEach(t => tagCounts[t] = (tagCounts[t]||0)+1));
+  const topTags = Object.entries(tagCounts).sort((a,b)=>b[1]-a[1]);
+  return `
+  <button class="back" onclick="nav('p-stats')">${ic('chevL',15)} Stats</button>
+  <h2 class="scr">What drivers said</h2>
+  <p class="scrsub">Every rating left for you, and the job it came from</p>
+  ${total ? `
+  <div class="cols2"><div>
+  <div class="card">
+    <div class="row"><div>
+      <div style="font-size:40px; font-weight:800; letter-spacing:-1.5px; line-height:1">${avg}</div>
+      <div>${star5(Math.round(avg))}</div>
+      <div class="faint" style="margin-top:3px">${total} review${total===1?'':'s'}</div>
+    </div></div>
+    <div class="divider"></div>
+    ${[5,4,3,2,1].map(n=>`
+      <div class="row" style="margin:5px 0"><span class="mini" style="width:44px">${n} star</span>
+        <span style="flex:1; height:7px; background:var(--soft); border-radius:4px; overflow:hidden; margin:0 10px">
+          <span style="display:block; height:100%; width:${Math.round(countFor(n)/total*100)}%; background:var(--red)"></span></span>
+        <span class="faint" style="width:22px; text-align:right">${countFor(n)}</span></div>`).join('')}
+  </div>
+  ${topTags.length ? `<div class="card">
+    <span class="sec">What they mention most</span>
+    <div class="chips" style="margin-top:9px">
+      ${topTags.map(([t,n])=>`<span class="chip sel">${esc(t)} · ${n}</span>`).join('')}
+    </div>
+  </div>` : ''}
+  </div><div>
+  ${d.reviews.map(r=>`
+    <div class="card click" onclick="nav('p-lead',{leadId:${r.request_id}})">
+      <div class="row"><div>${star5(r.stars)}</div>
+        <span class="faint">${timeAgo(r.created_at)}</span></div>
+      ${r.comment ? `<div class="mini" style="margin-top:6px">"${esc(r.comment)}"</div>` : ''}
+      ${(r.tags||[]).length ? `<div class="chips" style="margin-top:8px">${r.tags.map(t=>`<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
+      <div class="faint" style="margin-top:7px">Lead #${r.request_id} · ${esc(r.service_label)} · ${esc(r.area_label)}</div>
+    </div>`).join('')}
+  </div></div>` : `
+  <div class="card" style="text-align:center">
+    <span class="muted">No reviews yet. Drivers are asked to rate you after they mark the job complete —
+    the fastest way to your first one is to win a job and do it well.</span>
+  </div>`}`;
 }
 async function vPSettings(){
   const p = S.provider || {};
@@ -1883,7 +1969,7 @@ const VIEWS = {
   'd-pubprofile': vDPubProfile, 'd-rate': vDRate, 'd-garage': vDGarage,
   'p-setup1': vPSetup1, 'p-setup2': vPSetup2, 'p-setup3': vPSetup3, 'p-setup4': vPSetup4, 'p-setup5': vPSetup5,
   'p-feed': vPFeed, 'p-lead': vPLead, 'p-myleads': vPMyLeads, 'p-chat': ()=>chatView('p-threads'), 'p-threads': vThreads,
-  'p-stats': vPStats, 'p-settings': vPSettings,
+  'p-stats': vPStats, 'p-reviews': vPReviews, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
   'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-catalog': vACatalog, 'a-requests': vARequests, 'a-request': vARequest,
   'a-drivers': vADrivers, 'a-driver': vADriver
@@ -1898,7 +1984,7 @@ const NAVS = {
     {ico:'zap', label:'Live Leads', v:'p-feed', also:['p-lead']},
     {ico:'folder', label:'My Leads', v:'p-myleads'},
     {ico:'chat', label:'Messages', v:'p-threads', also:['p-chat']},
-    {ico:'chart', label:'Stats', v:'p-stats'},
+    {ico:'chart', label:'Stats', v:'p-stats', also:['p-reviews']},
     {ico:'sliders', label:'Settings', v:'p-settings'}],
   admin: [
     {ico:'home', label:'Overview', v:'a-home'},

@@ -699,12 +699,39 @@ router.get('/provider/stats', auth.requireRole('provider'), async (req, res) => 
     SELECT to_char(created_at, 'Dy') AS day, COUNT(*)::int AS n
     FROM purchases WHERE provider_id=$1 AND created_at > NOW() - INTERVAL '7 days'
     GROUP BY 1`, [req.user.id]);
+  // How long after buying a lead they actually said something to the driver. Speed is
+  // what wins these jobs, so a company should be able to see its own number.
+  const reply = await one(`
+    SELECT AVG(EXTRACT(EPOCH FROM (m.first_at - pu.created_at)) / 60)::float AS mins, COUNT(*)::int AS n
+    FROM purchases pu
+    JOIN LATERAL (
+      SELECT MIN(created_at) AS first_at FROM messages
+      WHERE request_id = pu.request_id AND sender_id = $1
+    ) m ON TRUE
+    WHERE pu.provider_id = $1 AND pu.refunded = FALSE AND m.first_at IS NOT NULL
+      AND m.first_at >= pu.created_at`, [req.user.id]);
   res.json({
     leads_bought: bought.n, spend_cents: bought.spend, jobs_won: won.n,
     win_rate: bought.n ? Math.round(won.n / bought.n * 100) : 0,
+    cost_per_win_cents: won.n ? Math.round(bought.spend / won.n) : null,
+    avg_reply_mins: reply?.n ? Math.round(reply.mins) : null,
+    replied_count: reply?.n || 0,
+    never_replied: Math.max(0, bought.n - (reply?.n || 0)),
     rating: p?.rating_count ? +(p.rating_sum / p.rating_count).toFixed(1) : null,
     rating_count: p?.rating_count || 0, week
   });
+});
+
+// Every review a driver left for this company, with the job it came from.
+router.get('/provider/reviews', auth.requireRole('provider'), async (req, res) => {
+  const rows = await q(`
+    SELECT rv.stars, rv.tags, rv.comment, rv.created_at,
+           req.id AS request_id, req.service_label, req.area_label
+    FROM reviews rv JOIN requests req ON req.id = rv.request_id
+    WHERE rv.target_provider = $1 ORDER BY rv.id DESC LIMIT 100`, [req.user.id]);
+  const breakdown = await q(`
+    SELECT stars, COUNT(*)::int AS n FROM reviews WHERE target_provider=$1 GROUP BY stars`, [req.user.id]);
+  res.json({ reviews: rows, breakdown });
 });
 
 /* ---------------- messaging ---------------- */

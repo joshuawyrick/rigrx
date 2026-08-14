@@ -158,6 +158,19 @@ Losing bidders keep the contact info and chat they paid for (so there is no refu
 
 Choosing a provider is irreversible, so it goes through a confirmation dialog that spells out the consequences, and **Chat first** is styled as the primary action on every responder card.
 
+## The company scoreboard
+
+**Stats** works the same way the admin Overview does — every number opens the data behind it:
+
+- **Leads bought** → every purchase, newest first
+- **Jobs won** → only the leads the driver chose them for, with what those cost
+- **Lead spend** → the same list with a spend total for what's shown
+- **Your rating** → every review a driver left, the star breakdown, the tags drivers mention most, and a tap through to the job each came from
+- **Cost per job won** → lead spend divided by jobs won. This is the number that tells a company whether RIGRX pays for itself, so it's on the front page rather than buried
+- **Avg reply time** → how long they take to message the driver after buying, plus how many leads they bought and never messaged at all
+
+The last two are deliberate. Speed and price are what win these jobs, and a company that can see it takes eleven minutes to answer — while its competitors answer in two — has something to act on. A short panel next to the chart explains each number in plain language, because most of these owners have never used a dashboard.
+
 ## The admin dashboard
 
 Every number on the Overview page is clickable and opens the data behind it:
