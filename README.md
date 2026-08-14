@@ -171,6 +171,22 @@ Choosing a provider is irreversible, so it goes through a confirmation dialog th
 
 The last two are deliberate. Speed and price are what win these jobs, and a company that can see it takes eleven minutes to answer — while its competitors answer in two — has something to act on. A short panel next to the chart explains each number in plain language, because most of these owners have never used a dashboard.
 
+## Archiving accounts (and why there is no delete)
+
+Every table hangs off `users` with `ON DELETE CASCADE`, so deleting an account would take its requests with it, and those requests would take the **purchases other companies paid for** with them. A single delete would remove leads a shop bought and quietly shrink your revenue history. So RIGRX has no delete button anywhere. It has archive.
+
+Archiving an account:
+
+- **Locks them out immediately.** Every live session is dropped, so someone already signed in is out on their next tap, not at token expiry. Signing in again returns "This account has been closed."
+- **Removes them from the marketplace.** Archived companies are excluded from matching, the SMS blast, the browsable lead feed and the pre-send match preview. An archived driver's requests disappear from the feed.
+- **Doesn't strand anyone.** Archiving a driver closes their open requests and texts any company that had already been chosen, so nobody chases a job that no longer exists.
+- **Keeps every record.** Purchases, requests, messages, reviews and revenue totals are untouched.
+- **Is reversible.** One button restores them. (Cancelled requests stay cancelled — a stale roadside request should not come back to life.)
+
+Archived accounts are hidden from **Providers** and **Drivers** by default, behind a "Show archived" toggle at the bottom of each list. You can attach a private reason when you archive, and it's shown on their page.
+
+If you ever need true erasure — a legal deletion request, say — that's a deliberate, one-at-a-time job rather than a button, precisely because it can't be undone.
+
 ## The admin dashboard
 
 Every number on the Overview page is clickable and opens the data behind it:

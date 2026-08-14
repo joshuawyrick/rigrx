@@ -218,6 +218,8 @@ router.post('/auth/verify', async (req, res) => {
   const ok = await auth.verifyCode(phone, String(req.body.code || ''));
   if (!ok) return res.status(400).json({ error: 'Wrong or expired code' });
   const user = await auth.findOrCreateUser(phone, req.body.role);
+  if (user.archived_at)
+    return res.status(403).json({ error: 'This account has been closed. Contact RIGRX if you think that is a mistake.' });
   const token = await auth.createSession(user.id);
   res.cookie('rigrx_session', token, { httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 3600 * 1000 });
   res.json({ user: publicUser(user) });
@@ -540,6 +542,7 @@ router.get('/leads', auth.requireRole('provider'), async (req, res) => {
     JOIN pricing pr ON pr.service_key = r.service_key
     JOIN users u ON u.id = r.driver_id
     WHERE r.status='open' AND r.created_at > NOW() - INTERVAL '6 hours'
+      AND u.archived_at IS NULL
       AND (r.licensed_only = FALSE OR $1::boolean = TRUE)
       AND (jsonb_array_length(r.trade_filter) = 0 OR r.trade_filter ? $2)
       AND ($3::jsonb ? r.duty_class)
@@ -734,6 +737,44 @@ router.get('/provider/reviews', auth.requireRole('provider'), async (req, res) =
   res.json({ reviews: rows, breakdown });
 });
 
+/* ---------------- archive & restore ---------------- */
+// There is deliberately no delete. Deleting a user cascades away the purchases other
+// companies paid for and silently rewrites the revenue history, so an account is
+// archived instead: locked out, invisible everywhere, every record intact, reversible.
+router.post('/admin/users/:id/archive', auth.requireRole('admin'), async (req, res) => {
+  const id = Number(req.params.id);
+  const u = await one('SELECT * FROM users WHERE id=$1', [id]);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (u.role === 'admin') return res.status(400).json({ error: 'You cannot archive an admin account' });
+  if (u.archived_at) return res.status(400).json({ error: 'Already archived' });
+
+  await q(`UPDATE users SET archived_at = NOW(), archive_reason = $1 WHERE id = $2`,
+    [String(req.body.reason || '').slice(0, 300), id]);
+  await auth.endAllSessions(id);          // signed-in devices are out on the next request
+
+  // Don't strand anyone mid-job: an archived driver's open requests are closed so
+  // companies stop chasing them, and a chosen company is told the job is off.
+  let cancelled = 0;
+  if (u.role === 'driver') {
+    const open = await q(`UPDATE requests SET status='cancelled'
+      WHERE driver_id=$1 AND status IN ('open','selected') RETURNING id, selected_provider`, [id]);
+    cancelled = open.length;
+    for (const r of open) {
+      if (!r.selected_provider) continue;
+      const pu = await one('SELECT u.phone, u.id FROM users u WHERE u.id=$1', [r.selected_provider]);
+      if (pu) await sms(pu.id, pu.phone, `RIGRX: Request #${r.id} has been closed and is no longer active.`);
+    }
+  }
+  res.json({ ok: true, cancelled_requests: cancelled });
+});
+
+router.post('/admin/users/:id/restore', auth.requireRole('admin'), async (req, res) => {
+  const u = await one(`UPDATE users SET archived_at = NULL, archive_reason = ''
+    WHERE id=$1 RETURNING *`, [req.params.id]);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+
 /* ---------------- messaging ---------------- */
 async function canAccessThread(user, requestId, providerId) {
   const r = await one('SELECT * FROM requests WHERE id=$1', [requestId]);
@@ -841,15 +882,18 @@ router.get('/admin/overview', auth.requireRole('admin'), async (req, res) => {
 router.get('/admin/providers', auth.requireRole('admin'), async (req, res) => {
   const rows = await q(`
     SELECT p.user_id, p.name, p.email, p.approved, p.license_verified, p.verification, p.created_at, p.primary_trade, u.phone,
+      u.archived_at, u.archive_reason,
       (SELECT COUNT(*)::int FROM provider_locations l WHERE l.user_id=p.user_id) AS location_count
     FROM providers p JOIN users u ON u.id=p.user_id
-    ORDER BY p.approved ASC, p.created_at DESC LIMIT 100`);
+    WHERE ($1::boolean = TRUE OR u.archived_at IS NULL)
+    ORDER BY p.approved ASC, p.created_at DESC LIMIT 100`, [req.query.archived === '1']);
   res.json(rows);
 });
 // Full provider dossier for the admin review page
 router.get('/admin/providers/:id', auth.requireRole('admin'), async (req, res) => {
   const p = await one(`
-    SELECT p.*, u.phone, u.email AS user_email, u.created_at AS signed_up
+    SELECT p.*, u.phone, u.email AS user_email, u.created_at AS signed_up,
+           u.archived_at, u.archive_reason
     FROM providers p JOIN users u ON u.id=p.user_id WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const [locations, custom, stats, reviews] = await Promise.all([
@@ -1016,11 +1060,13 @@ router.get('/admin/requests/:id', auth.requireRole('admin'), async (req, res) =>
 router.get('/admin/drivers', auth.requireRole('admin'), async (req, res) => {
   const rows = await q(`
     SELECT u.id, u.name, u.phone, u.email, u.company, u.driver_type, u.created_at,
+      u.archived_at, u.archive_reason,
       (SELECT COUNT(*)::int FROM requests r WHERE r.driver_id=u.id) AS requests,
       (SELECT COUNT(*)::int FROM trucks t WHERE t.user_id=u.id) AS trucks,
       (SELECT COALESCE(SUM(pu.amount_cents),0)::int FROM purchases pu
         JOIN requests r ON r.id=pu.request_id WHERE r.driver_id=u.id AND pu.refunded=FALSE) AS revenue_cents
-    FROM users u WHERE u.role='driver' ORDER BY u.id DESC LIMIT 100`);
+    FROM users u WHERE u.role='driver' AND ($1::boolean = TRUE OR u.archived_at IS NULL)
+    ORDER BY u.id DESC LIMIT 100`, [req.query.archived === '1']);
   res.json(rows);
 });
 

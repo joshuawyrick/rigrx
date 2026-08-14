@@ -64,6 +64,7 @@ async function matchProviders(request, extraMiles = 0) {
     JOIN users u ON u.id = p.user_id
     JOIN provider_locations l ON l.user_id = p.user_id
     WHERE p.approved = TRUE
+      AND u.archived_at IS NULL
       AND ($1::boolean = FALSE OR p.license_verified = TRUE)
       AND ($2::int = 0 OR p.primary_trade = ANY($3::text[]))
       AND p.duty_classes ? $4`,

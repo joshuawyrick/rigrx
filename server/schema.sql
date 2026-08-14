@@ -267,3 +267,11 @@ CREATE TABLE IF NOT EXISTS waitlist (
   contacted  BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Archived accounts: cannot sign in, invisible to matching and to every admin list
+-- by default, but every record they touched stays intact. Reversible on purpose —
+-- there is no delete, because deleting a user would cascade away purchases other
+-- companies paid for and quietly rewrite the revenue history.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_users_archived ON users(archived_at);

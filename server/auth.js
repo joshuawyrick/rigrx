@@ -44,6 +44,12 @@ async function findOrCreateUser(phone, role) {
   return user;
 }
 
+// Archiving takes effect immediately: every live session for that account is dropped,
+// so someone already signed in is out on their next request rather than at expiry.
+async function endAllSessions(userId) {
+  await q('DELETE FROM sessions WHERE user_id=$1', [userId]);
+}
+
 async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + 30 * 24 * 3600 * 1000); // 30 days
@@ -58,7 +64,7 @@ async function attachUser(req, res, next) {
     if (token) {
       req.user = await one(
         `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token=$1 AND s.expires_at > NOW()`, [token]);
+         WHERE s.token=$1 AND s.expires_at > NOW() AND u.archived_at IS NULL`, [token]);
     }
   } catch (e) { /* ignore */ }
   next();
@@ -76,4 +82,4 @@ function requireRole(role) {
   };
 }
 
-module.exports = { normalizePhone, requestCode, verifyCode, findOrCreateUser, createSession, attachUser, requireAuth, requireRole, DEV_MODE };
+module.exports = { normalizePhone, requestCode, verifyCode, findOrCreateUser, createSession, endAllSessions, attachUser, requireAuth, requireRole, DEV_MODE };

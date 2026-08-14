@@ -34,7 +34,7 @@ const qv = id => { const el = $(id); return el ? el.value : ''; };
 const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
-  activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null, leadFilter: '',
+  activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null, leadFilter: '', showArchived: false,
   leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy'
 };
 async function loadCatalog(){
@@ -1471,24 +1471,70 @@ async function vAHome(){
   ${o.pending_providers ? `<div class="card click alert" onclick="nav('a-providers')"><div class="row"><span class="mini k">${ic('clock',14)} ${o.pending_providers} provider${o.pending_providers===1?'':'s'} waiting for approval</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
 }
 async function vADrivers(){
-  const rows = await api('GET', '/admin/drivers');
-  return `
-  <h2 class="scr">Drivers</h2>
-  <p class="scrsub">Everyone who has requested help — click for their full history</p>
-  ${rows.map(d=>`<div class="card click" onclick="nav('a-driver',{adminDriverId:${d.id}})">
+  const showArch = !!S.showArchived;
+  const rows = await api('GET', '/admin/drivers' + (showArch ? '?archived=1' : ''));
+  const archived = rows.filter(d=>d.archived_at), active = rows.filter(d=>!d.archived_at);
+  const row = d => `<div class="card click" onclick="nav('a-driver',{adminDriverId:${d.id}})">
     <div class="row"><div><b class="mini k">${esc(d.name || '(no name yet)')}</b>
       <div class="faint">${esc(d.phone)}${d.company ? ' · '+esc(d.company) : ''} · ${d.requests} request${d.requests===1?'':'s'} · ${d.trucks} truck${d.trucks===1?'':'s'} · joined ${timeAgo(d.created_at)}</div></div>
     <span style="display:inline-flex; gap:8px; align-items:center">
+      ${d.archived_at ? '<span class="pill dark">ARCHIVED</span>' : ''}
       <span class="pill ${d.revenue_cents?'solid':'gray'}">${fmt$(d.revenue_cents)} earned</span>
       <span style="color:var(--red)">${ic('arrowR',16)}</span></span>
-  </div></div>`).join('') || '<div class="card"><span class="muted">No drivers yet</span></div>'}`;
+  </div></div>`;
+  return `
+  <h2 class="scr">Drivers</h2>
+  <p class="scrsub">Everyone who has requested help — click for their full history</p>
+  ${active.map(row).join('') || '<div class="card"><span class="muted">No drivers yet</span></div>'}
+  <div style="height:16px"></div>
+  <div class="row"><span class="sec">Archived${showArch ? ` (${archived.length})` : ''}</span>
+    <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${showArch ? 'Hide archived' : 'Show archived'} ›</span></div>
+  ${showArch ? (archived.map(row).join('') || '<div class="card"><span class="muted">Nobody archived</span></div>') : ''}`;
 }
+
+/* ---------------- archive & restore (admin) ---------------- */
+// No delete anywhere on purpose: removing a user would cascade away purchases other
+// companies paid for and rewrite the revenue history. Archiving locks them out and
+// hides them, and every record survives.
+function archiveCard(userId, who, archivedAt, reason){
+  if (archivedAt) return `
+  <div class="card" style="border-color:var(--red)">
+    <span class="sec" style="color:var(--red)">${ic('warn',13)} Archived</span>
+    <div class="mini" style="margin:7px 0 4px">Archived ${timeAgo(archivedAt)}. They cannot sign in, receive alerts, or appear anywhere in the app.</div>
+    ${reason ? `<div class="faint" style="margin-bottom:10px">Reason: ${esc(reason)}</div>` : '<div style="height:8px"></div>'}
+    <button class="btn" onclick="restoreUser(${userId})">${ic('check',16)} Restore this account</button>
+  </div>`;
+  return `
+  <div class="card">
+    <span class="sec">Archive this ${who}</span>
+    <div class="faint" style="margin:6px 0 10px; line-height:1.5">
+      Locks them out immediately and hides them from every list, the lead feed and matching.
+      Nothing is deleted — purchases, requests and reviews all stay, and you can restore them at any time.
+    </div>
+    <input type="text" id="arch-reason-${userId}" placeholder="Why? (optional, only you see this)">
+    <div style="height:9px"></div>
+    <button class="btn ghost" onclick="archiveUser(${userId}, '${who}')">${ic('box',15)} Archive</button>
+  </div>`;
+}
+async function archiveUser(id, who){
+  if (!confirm(`Archive this ${who}?\n\nThey will be signed out and locked out immediately, and will have to create a new account to come back. Nothing is deleted and you can restore them any time.`)) return;
+  const reason = qv('arch-reason-' + id);
+  const r = await api('POST', `/admin/users/${id}/archive`, { reason });
+  toast(r.cancelled_requests ? `Archived — ${r.cancelled_requests} open request${r.cancelled_requests===1?'':'s'} closed` : 'Archived');
+  render();
+}
+async function restoreUser(id){
+  await api('POST', `/admin/users/${id}/restore`);
+  toast('Restored — they can sign in again');
+  render();
+}
+
 async function vADriver(){
   const d = await api('GET', '/admin/drivers/' + S.adminDriverId);
   const u = d.driver;
   return `
   <button class="back" onclick="nav('a-drivers')">${ic('chevL',15)} All drivers</button>
-  <h2 class="scr" style="margin-top:8px">${esc(u.name || '(no name)')}</h2>
+  <h2 class="scr" style="margin-top:8px">${esc(u.name || '(no name)')}${u.archived_at ? ' <span class="pill dark" style="font-size:10px; vertical-align:middle">ARCHIVED</span>' : ''}</h2>
   <p class="scrsub">${esc(u.phone)} · ${esc(u.driver_type || 'driver')} · joined ${timeAgo(u.created_at)}${u.rating ? ' · rated '+u.rating+' by providers' : ''}</p>
   <div class="cols2"><div>
   <div class="card">
@@ -1499,6 +1545,7 @@ async function vADriver(){
       <span class="muted">Company</span> &nbsp;${esc(u.company || '—')}
     </div>
   </div>
+  ${archiveCard(u.id, 'driver', u.archived_at, u.archive_reason)}
   <div class="card">
     <span class="sec">Equipment on file</span>
     ${d.trucks.map(t=>`<div class="checkrow"><span class="cico on">${ic('truck',15)}</span><div class="mini"><b class="k">Unit ${esc(t.data.unit)} — ${esc(t.data.year)} ${esc(t.data.make)} ${esc(t.data.model)}</b><div class="faint">${esc(t.data.engine)} · ${esc(t.data.axles)} · tires ${esc(t.data.steer)} / ${esc(t.data.drive)}</div></div></div>`).join('')}
@@ -1517,15 +1564,18 @@ async function vADriver(){
   </div></div>`;
 }
 async function vAProviders(){
-  const rows = await api('GET', '/admin/providers');
-  const pending = rows.filter(p=>!p.approved), live = rows.filter(p=>p.approved);
+  const showArch = !!S.showArchived;
+  const rows = await api('GET', '/admin/providers' + (showArch ? '?archived=1' : ''));
+  const archived = rows.filter(p=>p.archived_at);
+  const active = rows.filter(p=>!p.archived_at);
+  const pending = active.filter(p=>!p.approved), live = active.filter(p=>p.approved);
   const row = p => `<div class="card click" onclick="nav('a-provider',{adminProviderId:${p.user_id}})">
     <div class="row"><div><b class="mini k">${esc(p.name || '(no name yet)')}</b>
       <div class="faint">${p.primary_trade ? esc(tradeLabel(p.primary_trade)) + ' · ' : ''}${esc(p.phone)} · ${p.location_count} location${p.location_count===1?'':'s'} ·
       License: ${p.verification?.license ? esc(p.verification.license) : 'none given'}</div></div>
     <span style="display:inline-flex; gap:6px; align-items:center">
       ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : ''}
-      ${p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
+      ${p.archived_at ? '<span class="pill dark">ARCHIVED</span>' : p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
       <span style="color:var(--red)">${ic('arrowR',16)}</span>
     </span></div></div>`;
   return `
@@ -1534,6 +1584,10 @@ async function vAProviders(){
   ${pending.length ? `<span class="sec">Waiting for review (${pending.length})</span>${pending.map(row).join('')}<div style="height:14px"></div>` : ''}
   <span class="sec">Approved (${live.length})</span>
   ${live.map(row).join('') || '<div class="card"><span class="muted">None yet</span></div>'}
+  <div style="height:16px"></div>
+  <div class="row"><span class="sec">Archived${showArch ? ` (${archived.length})` : ''}</span>
+    <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${showArch ? 'Hide archived' : 'Show archived'} ›</span></div>
+  ${showArch ? (archived.map(row).join('') || '<div class="card"><span class="muted">Nobody archived</span></div>') : ''}
   ${await waitlistCard()}`;
 }
 // Companies that raised their hand from outside a live corridor. This list is the
@@ -1645,6 +1699,8 @@ async function vAProvider(){
       ? `<button class="btn ghost" onclick="adminProv(${p.user_id},'reject')">Suspend this company</button>`
       : `<button class="btn" onclick="adminProv(${p.user_id},'approve')">${ic('check',16)} Approve — allow them to buy leads</button>`}
   </div>
+
+  ${archiveCard(p.user_id, 'company', p.archived_at, p.archive_reason)}
 
   <div class="card">
     <span class="sec">Private notes (only you see these)</span>
