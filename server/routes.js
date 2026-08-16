@@ -11,6 +11,8 @@ const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distan
 const { areaLabel } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
 const EQUIP = require('./equipment');
+// Same file the browser loads, so a message is judged identically on both sides.
+const guard = require('../public/guard.js');
 
 const router = express.Router();
 const MAX_STANDARD_SLOTS = 3;
@@ -392,8 +394,8 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
   }
   const request = await one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter, duty_class)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter, duty_class, direction)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
@@ -402,7 +404,8 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
      JSON.stringify(Array.isArray(b.trade_filter) ? b.trade_filter.slice(0, 8) : []),
      // trust the saved rig over whatever the client sent, falling back to heavy
      ['heavy','medium','light'].includes(truck.duty) ? truck.duty
-       : (['heavy','medium','light'].includes(b.duty_class) ? b.duty_class : 'heavy')]);
+       : (['heavy','medium','light'].includes(b.duty_class) ? b.duty_class : 'heavy'),
+     String(b.direction || '').slice(0, 24)]);
   // remember the driver's preference for next time
   await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
 
@@ -637,7 +640,7 @@ router.get('/leads/:id', requireDispatch, async (req, res) => {
   const base = {
     id: r.id, service_key: r.service_key, service_label: r.service_label,
     area_label: r.area_label, created_at: r.created_at, status: r.status,
-    situation: r.situation, can_move: r.can_move,
+    situation: r.situation, can_move: r.can_move, direction: r.direction || '',
     truck_class: r.truck?.make ? `${r.truck.year || ''} ${r.truck.make} ${r.truck.model || ''}`.trim() : 'Class 8 tractor',
     trailer_type: r.trailer?.type || 'No trailer',
     hazmat: !!(r.trailer && r.trailer.hazmat),
@@ -1079,12 +1082,26 @@ router.get('/messages/:requestId/:providerId', auth.requireAuth, async (req, res
   const other = req.user.role === 'provider'
     ? await one('SELECT name FROM users WHERE id=$1', [r.driver_id])
     : await one('SELECT name FROM providers WHERE user_id=$1', [req.params.providerId]);
+  // How many other companies are in play, and how many have actually quoted. The
+  // driver sees this before he chooses so he isn't rushed into the first bid.
+  let others = null;
+  if (req.user.role !== 'provider') {
+    const c = await one(`
+      SELECT COUNT(*)::int AS responders,
+        COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM messages m WHERE m.request_id = pu.request_id
+            AND m.provider_id = pu.provider_id AND m.quote IS NOT NULL))::int AS quoted
+      FROM purchases pu WHERE pu.request_id=$1 AND pu.refunded=FALSE AND pu.provider_id <> $2`,
+      [r.id, req.params.providerId]);
+    others = { responders: c?.responders || 0, quoted: c?.quoted || 0 };
+  }
   res.json({
     request: {
       id: r.id, service_label: r.service_label, status: r.status,
       driver_id: r.driver_id, selected_provider: r.selected_provider
     },
     other_name: other?.name || '',
+    others,
     messages: msgs
   });
 });
@@ -1098,6 +1115,22 @@ router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, re
   const m = await one(
     `INSERT INTO messages (request_id, provider_id, sender_id, body, quote) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
     [req.params.requestId, req.params.providerId, req.user.id, body, quote ? JSON.stringify(quote) : null]);
+
+  // The message is already saved and delivered before we judge it — the guard is a
+  // review queue, never a gate. Only matters while the job is still up for grabs;
+  // once a company is chosen they're entitled to the location anyway.
+  if (r.status === 'open' && body) {
+    const senderRole = req.user.id === r.driver_id ? 'driver' : 'provider';
+    const hit = guard.inspect(body, senderRole);
+    if (hit) {
+      await q(`INSERT INTO chat_flags
+        (request_id, provider_id, message_id, sender_id, sender_role, type, kind, snippet, warned)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [r.id, req.params.providerId, m.id, req.user.id, senderRole,
+         hit.type, hit.kind, hit.snippet, !!req.body.warned]);
+    }
+  }
+
   // push to the other party
   const recipient = req.user.id === r.driver_id ? Number(req.params.providerId) : r.driver_id;
   wsPush(recipient, 'message', m);
@@ -1146,12 +1179,39 @@ router.get('/admin/overview', auth.requireRole('admin'), async (req, res) => {
     one(`SELECT COUNT(*) FILTER (WHERE role='driver')::int AS drivers,
                 COUNT(*) FILTER (WHERE role='provider')::int AS providers FROM users`)
   ]);
+  const flags = await one(`SELECT COUNT(*)::int AS n FROM chat_flags WHERE reviewed_at IS NULL`);
   res.json({
     requests_24h: reqToday.n, revenue_24h_cents: revToday.c, revenue_total_cents: revTotal.c,
     pending_providers: pendingProviders.n,
     fill_rate: fill.total ? Math.round(fill.filled / fill.total * 100) : 0,
-    drivers: users.drivers, providers: users.providers
+    drivers: users.drivers, providers: users.providers,
+    open_flags: flags.n
   });
+});
+
+/* ---- chat guard review queue ---- */
+router.get('/admin/flags', auth.requireRole('admin'), async (req, res) => {
+  const showAll = String(req.query.all || '') === '1';
+  const rows = await q(`
+    SELECT f.*, p.name AS company, u.name AS sender_name, r.service_label, m.body
+    FROM chat_flags f
+    LEFT JOIN providers p ON p.user_id = f.provider_id
+    LEFT JOIN users u ON u.id = f.sender_id
+    LEFT JOIN requests r ON r.id = f.request_id
+    LEFT JOIN messages m ON m.id = f.message_id
+    ${showAll ? '' : 'WHERE f.reviewed_at IS NULL'}
+    ORDER BY f.created_at DESC LIMIT 200`);
+  // A repeat offender matters far more than a one-off, so send the running count too.
+  const tally = await q(`
+    SELECT f.provider_id, p.name AS company, COUNT(*)::int AS n
+    FROM chat_flags f LEFT JOIN providers p ON p.user_id=f.provider_id
+    WHERE f.sender_role='provider' GROUP BY f.provider_id, p.name ORDER BY n DESC LIMIT 20`);
+  res.json({ flags: rows, repeat: tally });
+});
+
+router.post('/admin/flags/:id/review', auth.requireRole('admin'), async (req, res) => {
+  await q(`UPDATE chat_flags SET reviewed_at = NOW() WHERE id=$1`, [req.params.id]);
+  res.json({ ok: true });
 });
 
 router.get('/admin/providers', auth.requireRole('admin'), async (req, res) => {

@@ -35,7 +35,8 @@ const S = {
   view: 'loading', me: null, provider: null, trucks: [], trailers: [],
   draft: null,          // request being composed
   activeRequestId: null, chatKey: null, viewProviderId: null, rateRequestId: null, leadFilter: '', showArchived: false,
-  leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy'
+  leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy',
+  chatBack: null, chatDraft: '', chatCtx: null, guardWaived: false, keepChatFocus: false, flagsAll: false
 };
 async function loadCatalog(){
   try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
@@ -445,7 +446,7 @@ async function vDHome(){
   </div></div></div>`;
 }
 function startRequest(){
-  S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no',
+  S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no', direction: '',
               lat: null, lng: null, photos: [],
               licensed_only: !!S.me?.prefer_licensed_only,   // remembers last choice
               trade_filter: [],
@@ -604,6 +605,12 @@ function vDLocation(){
     <div style="height:12px"></div>
     <button class="btn" onclick="captureGPS()">${ic('pin',16)} Use my GPS location</button>
   </div>`}
+  <label class="f">Which way were you headed?</label>
+  <div class="chips" id="rq-direction">
+    ${['Northbound','Southbound','Eastbound','Westbound','Not on a highway'].map(x=>`<span class="chip ${d.direction===x?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+  </div>
+  <div class="faint" style="margin-top:6px">On a divided highway this is the difference between a 5-minute and a 30-minute response. Companies see it up front so they never have to ask.</div>
+  <div style="height:4px"></div>
   <label class="f">Landmark or mile marker (optional, helps a lot)</label>
   <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="I-5 NB shoulder, mile marker 253, past the Buttonwillow exit">
   <div class="faint" style="margin-top:6px">Only companies that buy your lead see this.</div>
@@ -643,6 +650,7 @@ function saveLocation(){
   const d = S.draft;
   if (!d.lat) return toast('Share your location first');
   d.landmark = qv('rq-landmark');
+  d.direction = selOf('rq-direction')[0] || '';
   nav('d-review');
 }
 function vDReview(){
@@ -971,7 +979,7 @@ function openThread(reqId, provId, from){
   nav(S.me.role === 'provider' ? 'p-chat' : 'd-chat');
 }
 function leaveChat(view, extra){
-  S.chatDraft = ''; S.chatBack = null;
+  S.chatDraft = ''; S.chatBack = null; S.guardWaived = false;
   nav(view, extra);
 }
 async function chatView(backView){
@@ -990,6 +998,8 @@ async function chatView(backView){
   const safeName = esc(other).replace(/'/g, '');
   const back = S.chatBack || backView;
   const backLabel = back === 'd-active' ? 'Responders' : back === 'p-jobs' ? 'Jobs' : 'Messages';
+  // Everything the guard prompts need, stashed where the send handler can reach it.
+  S.chatCtx = { r, p, open, isDriver, name: other, others: d.others || { responders: 0, quoted: 0 } };
   afterChatRender(wasTyping);
   return `
   <div class="chatscreen">
@@ -1003,6 +1013,9 @@ async function chatView(backView){
     <div class="chatscroll" id="chatlog">
       ${isDriver && open ? `<div class="card alert">
         <div class="mini" style="line-height:1.5">${ic('lock',13)} Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.</div>
+      </div>` : ''}
+      ${!isDriver && open ? `<div class="card alert">
+        <div class="mini" style="line-height:1.5">${ic('lock',13)} <b class="k">Don't ask for the exact location here.</b> You get the pin, the mile marker and turn-by-turn directions the second this driver picks you. Asking for it early is against the rules and gets flagged for review.</div>
       </div>` : ''}
       ${d.messages.map(m=>`
         <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
@@ -1061,11 +1074,74 @@ function afterChatRender(refocus){
 async function sendChat(){
   const body = qv('chatIn').trim();
   if (!body) return;
+  const c = S.chatCtx || {};
+  // Only worth interrupting while the job is still up for grabs. Once a company is
+  // chosen they're entitled to the location, so the guard steps out of the way.
+  if (c.open && window.RIGRX_GUARD && !S.guardWaived){
+    const hit = RIGRX_GUARD.inspect(body, c.isDriver ? 'driver' : 'provider');
+    if (hit && hit.type === 'share') return askBeforeSharing(body);
+    if (hit && hit.type === 'ask')   return warnBeforeAsking(body);
+  }
+  await postChat(body, S.guardWaived);
+}
+async function postChat(body, warned){
+  S.guardWaived = false;
   S.chatDraft = '';
   const el = $('chatIn'); if (el) el.value = '';
   S.keepChatFocus = true;   // keyboard stays up after sending, like iMessage
-  await api('POST', `/messages/${S.chatKey.r}/${S.chatKey.p}`, { body });
+  await api('POST', `/messages/${S.chatKey.r}/${S.chatKey.p}`, { body, warned: !!warned });
   render();
+}
+/* The driver typed his location. What he MEANS is "come get me" — which is the
+   Choose button. So offer that instead of scolding him, and show what choosing
+   costs him so a pushy shop can't use this prompt to jump the queue. */
+function askBeforeSharing(body){
+  const c = S.chatCtx;
+  const waiting = Math.max(0, (c.others?.responders || 0));
+  const quoted  = Math.max(0, (c.others?.quoted || 0));
+  const el = document.createElement('div');
+  el.className = 'modalwrap'; el.id = 'confirmWrap';
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Want them to come to you?</h3>
+      <p>Choosing <b class="k">${esc(c.name)}</b> sends them your exact pin and turn-by-turn
+         directions automatically — you don't have to type any of it out.</p>
+      ${waiting ? `<p>${ic('warn',13)} Heads up: choosing ends your request.
+        ${waiting} other compan${waiting===1?'y is':'ies are'} on this job${quoted ? ` and ${quoted} ${quoted===1?'has':'have'} already quoted` : ' and could still come back with a better price'} —
+        you won't see what they would have charged.</p>` : ''}
+      <div class="acts">
+        <button class="btn ghost" onclick="sendAnyway()">Send it anyway</button>
+        <button class="btn" onclick="closeConfirm(); askChoose(${c.r},${c.p},'${esc(c.name).replace(/'/g,'')}')">${ic('check',15)} Choose them</button>
+      </div>
+      <div class="faint" style="text-align:center; margin-top:10px">You're never forced to share your spot early.</div>
+    </div>`;
+  el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  document.body.appendChild(el);
+}
+/* A company fishing for the location before it's theirs. Warn once, never block —
+   and either way the server has already logged it for the admin queue. */
+function warnBeforeAsking(body){
+  const el = document.createElement('div');
+  el.className = 'modalwrap'; el.id = 'confirmWrap';
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Hold off on asking where they are</h3>
+      <p>You get the exact pin, the mile marker and turn-by-turn directions the moment this
+         driver picks you — you don't need to ask for them.</p>
+      <p>${ic('warn',13)} Asking before you're chosen is against the RIGRX rules, and this
+         message will be flagged for review. Quote from the distance and drive time on the lead instead.</p>
+      <div class="acts">
+        <button class="btn ghost" onclick="sendAnyway()">Send anyway</button>
+        <button class="btn dark" onclick="closeConfirm()">Let me reword it</button>
+      </div>
+    </div>`;
+  el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  document.body.appendChild(el);
+}
+function sendAnyway(){
+  closeConfirm();
+  S.guardWaived = true;
+  sendChat();
 }
 async function sendQuote(){
   const amt = Math.round(parseFloat(qv('q-amt').replace(/[^0-9.]/g,'')) * 100);
@@ -1387,6 +1463,8 @@ async function vPLead(){
       <span class="muted">Hazmat</span> &nbsp;${l.hazmat ? `<span style="color:var(--red);font-weight:700">Yes — Class ${esc(l.hazmat_info?.class)}, UN ${esc(l.hazmat_info?.un)}</span>` : 'No'}<br>
       <span class="muted">Mobility</span> &nbsp;${l.can_move==='no' ? "Can't move under own power" : l.can_move==='short' ? 'Can limp a short distance' : 'Can move'}<br>
       <span class="muted">Area</span> &nbsp;${esc(l.area_label)}<br>
+      ${l.direction ? `<span class="muted">Heading</span> &nbsp;<b class="k">${esc(l.direction)}</b><br>` : ''}
+      <span class="muted">Situation</span> &nbsp;${(l.situation||[]).map(esc).join(' · ') || '—'}<br>
       <span class="muted">Driver rating</span> &nbsp;${l.driver_rating ? star5(Math.round(l.driver_rating)) + ' ' + l.driver_rating + ' as rated by providers' : 'New driver'}
     </div>
   </div>
@@ -1868,8 +1946,59 @@ async function vAHome(){
     ${tile('Fill rate', o.fill_rate + '%', 'requests nobody bought', 'a-requests', `{adminReqWindow:'unfilled'}`)}
     ${tile('Drivers', o.drivers, 'who is requesting help', 'a-drivers')}
     ${tile('Providers', o.providers, `${o.pending_providers} awaiting approval`, 'a-providers')}
+    ${tile('Chat flags', o.open_flags, 'messages to review', 'a-flags')}
   </div>
-  ${o.pending_providers ? `<div class="card click alert" onclick="nav('a-providers')"><div class="row"><span class="mini k">${ic('clock',14)} ${o.pending_providers} provider${o.pending_providers===1?'':'s'} waiting for approval</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
+  ${o.pending_providers ? `<div class="card click alert" onclick="nav('a-providers')"><div class="row"><span class="mini k">${ic('clock',14)} ${o.pending_providers} provider${o.pending_providers===1?'':'s'} waiting for approval</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
+  ${o.open_flags ? `<div class="card click alert" onclick="nav('a-flags')"><div class="row"><span class="mini k">${ic('warn',14)} ${o.open_flags} chat message${o.open_flags===1?'':'s'} flagged for review</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
+}
+/* The review queue. Nothing here was blocked — these are messages that already went
+   through, listed so the admin can decide whether a company needs a phone call. */
+const FLAG_LABEL = {
+  ask: ['Asked for the location early', 'red'],
+  share: ['Driver shared his spot early', 'gray'],
+  offplatform: ['Pushing the job off RIGRX', 'dark']
+};
+async function vAFlags(){
+  const all = !!S.flagsAll;
+  const d = await api('GET', '/admin/flags' + (all ? '?all=1' : ''));
+  const row = f => {
+    const [label, tone] = FLAG_LABEL[f.type] || ['Flagged', 'gray'];
+    return `<div class="card">
+      <div class="row"><div>
+        <b class="mini k">${esc(f.company || 'Unknown company')}</b>
+        <div class="faint">${esc(f.sender_role === 'provider' ? (f.sender_name || 'the company') : (f.sender_name || 'the driver'))}
+          · Request #${f.request_id} · ${esc(f.service_label || '')} · ${timeAgo(f.created_at)}</div>
+      </div><span class="pill ${tone}">${label}</span></div>
+      <div class="quote" style="display:block">
+        <div class="mini" style="line-height:1.5">"${esc((f.body || '').slice(0, 240))}"</div>
+        <div class="faint" style="margin-top:6px">matched: <b class="k">${esc(f.snippet)}</b>${f.warned ? ' · <span style="color:var(--red)">warned first and sent it anyway</span>' : ''}</div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <a onclick="nav('a-provider',{adminProviderId:${f.provider_id}})">Open ${esc(f.company || 'company')}</a>
+        ${f.reviewed_at ? '<span class="pill gray">REVIEWED</span>'
+          : `<button class="btn ghost" style="width:auto; padding:9px 14px" onclick="reviewFlag(${f.id})">${ic('check',14)} Mark reviewed</button>`}
+      </div>
+    </div>`;
+  };
+  return `
+  <h2 class="scr">Chat flags</h2>
+  <p class="scrsub">Nothing here was blocked — a driver stuck on the shoulder always gets his message through. This is what to follow up on.</p>
+  ${d.repeat.length ? `<div class="card">
+    <span class="sec">Companies flagged most</span>
+    <div class="mini listline" style="margin-top:8px">
+      ${d.repeat.map(t=>`<span class="muted">${esc(t.company || 'Unknown')}</span> &nbsp;<b class="k">${t.n} flag${t.n===1?'':'s'}</b>`).join('<br>')}
+    </div>
+    <div class="faint" style="margin-top:8px">One flag is usually a shop that doesn't know the rules yet — a phone call fixes it. A pattern is something else.</div>
+  </div>` : ''}
+  <div class="chips" style="margin:4px 0 12px">
+    <span class="chip ${all?'':'sel'}" onclick="S.flagsAll=false; render()">Needs review</span>
+    <span class="chip ${all?'sel':''}" onclick="S.flagsAll=true; render()">Everything</span>
+  </div>
+  ${d.flags.map(row).join('') || `<div class="card" style="text-align:center"><span class="muted">${ic('check',14)} Nothing flagged${all?'':' that still needs a look'}.</span></div>`}`;
+}
+async function reviewFlag(id){
+  await api('POST', `/admin/flags/${id}/review`);
+  toast('Marked reviewed'); render();
 }
 async function vADrivers(){
   const showArch = !!S.showArchived;
@@ -2429,7 +2558,7 @@ const VIEWS = {
   'p-stats': vPStats, 'p-reviews': vPReviews, 'p-people': vPPeople, 'p-jobs': vPJobs, 't-jobs': vTechJobs, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
   'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-catalog': vACatalog, 'a-requests': vARequests, 'a-request': vARequest,
-  'a-drivers': vADrivers, 'a-driver': vADriver
+  'a-drivers': vADrivers, 'a-driver': vADriver, 'a-flags': vAFlags
 };
 const AUTH_LAYOUT = new Set(['signin','code','d-setup1','d-setup2','d-setup3','p-setup1','p-setup2','p-setup3','p-setup4','p-setup5','loading']);
 const NAVS = {
@@ -2456,7 +2585,8 @@ const NAVS = {
     {ico:'tag', label:'Pricing', v:'a-pricing'},
     {ico:'card', label:'Sales', v:'a-purchases'},
     {ico:'plus', label:'Requested', v:'a-custom'},
-    {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']}]
+    {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']},
+    {ico:'warn', label:'Chat flags', v:'a-flags'}]
 };
 let renderSeq = 0;
 async function render(){

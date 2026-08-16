@@ -304,3 +304,31 @@ ALTER TABLE requests ADD COLUMN IF NOT EXISTS eta_minutes    INTEGER;
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS eta_set_at     TIMESTAMPTZ;
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS assign_bounced BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_requests_tech ON requests(assigned_tech);
+
+-- ---- direction of travel ----
+-- A shop quoting a job on a divided highway needs to know which side you're on.
+-- It's the one thing they legitimately had to ask for in chat, so we put it in the
+-- lead instead: give them every honest reason to not ask, and the ones who ask
+-- anyway stand out.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT '';
+
+-- ---- chat guard flags ----
+-- Nothing here blocks a message. This is a review queue: the server judges every
+-- message the same way the browser did, so a company that dismisses the warning
+-- (or scripts around it) still lands in the admin's list.
+CREATE TABLE IF NOT EXISTS chat_flags (
+  id          SERIAL PRIMARY KEY,
+  request_id  INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+  sender_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender_role TEXT NOT NULL DEFAULT '',        -- driver | provider
+  type        TEXT NOT NULL,                   -- ask | share | offplatform
+  kind        TEXT NOT NULL DEFAULT '',        -- which pattern matched
+  snippet     TEXT NOT NULL DEFAULT '',        -- the matched words only, for review
+  warned      BOOLEAN NOT NULL DEFAULT FALSE,  -- did we warn them and they sent anyway?
+  reviewed_at TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_flags_open ON chat_flags(reviewed_at, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_flags_provider ON chat_flags(provider_id);

@@ -28,7 +28,7 @@ const fs = require('fs');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 function buildStamp() {
   let newest = 0;
-  for (const f of ['app.js', 'icons.js', 'styles.css', 'index.html']) {
+  for (const f of ['app.js', 'icons.js', 'guard.js', 'styles.css', 'index.html']) {
     try { newest = Math.max(newest, fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs); } catch (e) {}
   }
   return String(Math.round(newest));
