@@ -1074,7 +1074,19 @@ router.get('/messages/:requestId/:providerId', auth.requireAuth, async (req, res
   if (!r) return res.status(403).json({ error: 'No access to this thread' });
   const msgs = await q(`SELECT * FROM messages WHERE request_id=$1 AND provider_id=$2 ORDER BY id`,
     [req.params.requestId, req.params.providerId]);
-  res.json({ request: { id: r.id, service_label: r.service_label, status: r.status, driver_id: r.driver_id }, messages: msgs });
+  // Who am I talking to? The chat header shows the name so a driver comparing four
+  // companies always knows which thread they are in.
+  const other = req.user.role === 'provider'
+    ? await one('SELECT name FROM users WHERE id=$1', [r.driver_id])
+    : await one('SELECT name FROM providers WHERE user_id=$1', [req.params.providerId]);
+  res.json({
+    request: {
+      id: r.id, service_label: r.service_label, status: r.status,
+      driver_id: r.driver_id, selected_provider: r.selected_provider
+    },
+    other_name: other?.name || '',
+    messages: msgs
+  });
 });
 
 router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, res) => {

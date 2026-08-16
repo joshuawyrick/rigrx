@@ -795,7 +795,7 @@ async function vDActive(){
       </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
       ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
       <div class="actions">
-        <button class="btn chat" onclick="nav('d-chat',{chatKey:{r:${r.id},p:${x.provider_id}}})">${ic('chat',15)} Chat first</button>
+        <button class="btn chat" onclick="openThread(${r.id},${x.provider_id},'d-active')">${ic('chat',15)} Chat first</button>
         ${r.status==='open' ? `<button class="btn choose" onclick="askChoose(${r.id},${x.provider_id},'${esc(x.name).replace(/'/g,"")}')">${ic('check',15)} Choose</button>` : ''}
       </div>
     </div>`).join('')}
@@ -959,47 +959,111 @@ async function vThreads(){
   return `
   <h2 class="scr">Messages</h2>
   <p class="scrsub">${rows.length ? 'One thread per request & company' : 'No conversations yet'}</p>
-  ${rows.map(t=>`<div class="card click" onclick="openThread(${t.request_id},${t.provider_id})">
+  ${rows.map(t=>`<div class="card click" onclick="openThread(${t.request_id},${t.provider_id},null)">
     <div class="row"><div><b class="mini k">${esc(t.other_name || 'Conversation')}</b>
     <div class="faint">Request #${t.request_id} · ${esc(t.service_label)}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
     <span class="pill ${t.status==='open'?'red':'gray'}">${esc(t.status)}</span></div></div>`).join('')}`;
 }
-function openThread(reqId, provId){
+function openThread(reqId, provId, from){
   S.chatKey = { r: reqId, p: provId };
+  S.chatBack = from || null;
+  S.chatDraft = '';
   nav(S.me.role === 'provider' ? 'p-chat' : 'd-chat');
+}
+function leaveChat(view, extra){
+  S.chatDraft = ''; S.chatBack = null;
+  nav(view, extra);
 }
 async function chatView(backView){
   const { r, p } = S.chatKey;
   const d = await api('GET', `/messages/${r}/${p}`);
   const mine = uid => uid === S.me.id;
+  // Grab this BEFORE the re-render wipes the DOM: if a message arrives while you are
+  // mid-sentence, we put the cursor back where it was instead of closing the keyboard.
+  // Tapping Send blurs the field first, so sendChat sets the flag explicitly.
+  const wasTyping = S.keepChatFocus || (document.activeElement && document.activeElement.id === 'chatIn');
+  S.keepChatFocus = false;
+  const isDriver = S.me.role !== 'provider';
+  const open = d.request.status === 'open';
+  const chosen = Number(d.request.selected_provider) === Number(p);
+  const other = d.other_name || (isDriver ? 'Service company' : 'Driver');
+  const safeName = esc(other).replace(/'/g, '');
+  const back = S.chatBack || backView;
+  const backLabel = back === 'd-active' ? 'Responders' : back === 'p-jobs' ? 'Jobs' : 'Messages';
+  afterChatRender(wasTyping);
   return `
-  <button class="back" onclick="nav('${backView}')">${ic('chevL',15)} Back</button>
-  <div class="card" style="margin-top:8px"><div class="row"><b class="k">Request #${r} · ${esc(d.request.service_label)}</b>
-    <span class="pill ${d.request.status==='open'?'red':'dark'}">${esc(d.request.status.toUpperCase())}</span></div></div>
-  ${S.me.role !== 'provider' && d.request.status === 'open' ? `<div class="card alert" style="margin-top:10px">
-    <div class="mini" style="line-height:1.5">${ic('lock',13)} Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.</div>
-  </div>` : ''}
-  <div class="chatbox" id="chatlog">
-    ${d.messages.map(m=>`
-      <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
-        ${m.quote ? `${ic('tag',14)} <b class="k">QUOTE — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
-        <span class="t">${timeAgo(m.created_at)}</span>
-      </div>`).join('') || '<div class="faint" style="text-align:center; padding:20px">Say hello — the other side is notified instantly</div>'}
-  </div>
-  ${S.me.role === 'provider' ? `
-  <div class="card" style="margin-top:12px">
-    <span class="sec">Send a structured quote</span>
-    <div class="row" style="gap:8px; margin-top:8px">
-      <input type="text" id="q-amt" placeholder="$ amount" style="flex:1">
-      <input type="text" id="q-eta" placeholder="ETA (35 min)" style="flex:1">
-      <button class="btn dark" style="width:auto; padding:12px 14px" onclick="sendQuote()">${ic('tag',14)} Quote</button>
+  <div class="chatscreen">
+    <div class="chathead">
+      <button class="cbtn" onclick="leaveChat('${back}')">${ic('chevL',16)} <span>${backLabel}</span></button>
+      <div class="who"><b class="k">${esc(other)}</b>
+        <span class="faint">Request #${r} · ${esc(d.request.service_label)}</span></div>
+      ${chosen ? '<span class="pill solid">CHOSEN</span>'
+        : `<span class="pill ${open?'red':'dark'}">${esc(d.request.status.toUpperCase())}</span>`}
     </div>
-  </div>` : ''}
-  <div class="chatin"><input type="text" id="chatIn" placeholder="Type a message…" onkeydown="if(event.key==='Enter')sendChat()"><button onclick="sendChat()">${ic('send',17)}</button></div>`;
+    <div class="chatscroll" id="chatlog">
+      ${isDriver && open ? `<div class="card alert">
+        <div class="mini" style="line-height:1.5">${ic('lock',13)} Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.</div>
+      </div>` : ''}
+      ${d.messages.map(m=>`
+        <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
+          ${m.quote ? `${ic('tag',14)} <b class="k">QUOTE — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
+          <span class="t">${timeAgo(m.created_at)}</span>
+        </div>`).join('') || '<div class="faint" style="text-align:center; padding:20px">Say hello — the other side is notified instantly</div>'}
+    </div>
+    ${isDriver && open ? `<div class="chatact">
+      <button class="btn ghost" onclick="leaveChat('d-active',{activeRequestId:${r}})">${ic('chevL',14)} Responders</button>
+      <button class="btn choose" onclick="askChoose(${r},${p},'${safeName}')">${ic('check',15)} Choose this company</button>
+    </div>` : ''}
+    ${!isDriver ? `
+    <div class="quotebar">
+      <input type="text" id="q-amt" inputmode="decimal" placeholder="$ amount">
+      <input type="text" id="q-eta" placeholder="ETA (35 min)">
+      <button class="btn dark" style="width:auto; padding:12px 14px" onclick="sendQuote()">${ic('tag',14)} Quote</button>
+    </div>` : ''}
+    <div class="chatin">
+      <input type="text" id="chatIn" placeholder="Type a message…" enterkeyhint="send"
+        value="${esc(S.chatDraft || '')}" oninput="S.chatDraft=this.value"
+        onkeydown="if(event.key==='Enter')sendChat()">
+      <button onclick="sendChat()">${ic('send',17)}</button>
+    </div>
+  </div>`;
+}
+/* Keeps the chat pinned to the visible area. On a phone the on-screen keyboard
+   shrinks the *visual* viewport but not the page, which is what pushed the send
+   button off-screen and forced sideways scrolling. We size the chat to the visual
+   viewport instead, so the composer sits right on top of the keyboard — like iMessage. */
+let vvBound = false;
+function fitChat(){
+  const el = document.querySelector('.chatscreen');
+  if (!el) return;
+  const vv = window.visualViewport;
+  if (window.innerWidth >= 960 || !vv){ el.style.height = ''; el.style.transform = ''; return; }
+  el.style.height = vv.height + 'px';
+  el.style.transform = `translateY(${Math.max(0, vv.offsetTop)}px)`;
+  // Keyboard up? Drop the home-indicator gap so the composer hugs the keys.
+  el.classList.toggle('kb', vv.height < window.innerHeight - 120);
+}
+function scrollChatToEnd(){ const l = $('chatlog'); if (l) l.scrollTop = l.scrollHeight; }
+function afterChatRender(refocus){
+  setTimeout(()=>{
+    fitChat(); scrollChatToEnd();
+    if (refocus){
+      const i = $('chatIn');
+      if (i){ i.focus(); try { i.setSelectionRange(i.value.length, i.value.length); } catch(e){} }
+    }
+  }, 0);
+  if (!vvBound && window.visualViewport){
+    vvBound = true;
+    window.visualViewport.addEventListener('resize', ()=>{ fitChat(); setTimeout(scrollChatToEnd, 60); });
+    window.visualViewport.addEventListener('scroll', fitChat);
+  }
 }
 async function sendChat(){
   const body = qv('chatIn').trim();
   if (!body) return;
+  S.chatDraft = '';
+  const el = $('chatIn'); if (el) el.value = '';
+  S.keepChatFocus = true;   // keyboard stays up after sending, like iMessage
   await api('POST', `/messages/${S.chatKey.r}/${S.chatKey.p}`, { body });
   render();
 }
@@ -1372,7 +1436,7 @@ async function vPLead(){
   </div>`}
   </div><div>
   ${full ? `
-  <button class="btn" onclick="openThread(${l.id}, ${S.me.id})">${ic('chat',16)} Message the driver now</button>
+  <button class="btn" onclick="openThread(${l.id}, ${S.me.company_id || S.me.id}, 'p-myleads')">${ic('chat',16)} Message the driver now</button>
   <div style="height:8px"></div>
   ${l.selected_provider === S.me.id ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
   ` : `
@@ -2399,6 +2463,8 @@ async function render(){
   const seq = ++renderSeq;
   const root = $('root');
   const fn = VIEWS[S.view];
+  // Chat takes over the phone screen — no tab bar, no page scroll behind it.
+  document.body.classList.toggle('chatmode', S.view === 'd-chat' || S.view === 'p-chat');
   if (!fn){ root.innerHTML = authShell('<div class="card">Page not found. <a onclick="nav(homeFor())">Go home</a></div>'); return; }
   let html;
   try { html = await fn(); }

@@ -101,7 +101,8 @@
   b.k{font-weight:700;}
   .sec{font-size:11px; color:var(--muted); font-weight:700; letter-spacing:.7px; text-transform:uppercase;}
   label.f{display:block; font-size:11px; color:var(--muted); font-weight:700; margin:12px 2px 6px; text-transform:uppercase; letter-spacing:.7px;}
-  input[type=text],input[type=password],textarea,select{width:100%; background:var(--panel); border:1px solid var(--border); color:var(--ink);
+  input[type=text],input[type=tel],input[type=number],input[type=email],input[type=password],textarea,select{
+    width:100%; background:var(--panel); border:1px solid var(--border); color:var(--ink);
     border-radius:11px; padding:12px; font-size:14px; font-family:inherit; outline-color:var(--red);}
   textarea{resize:none;}
   .tbl{width:100%; border-collapse:collapse; font-size:13px;}
@@ -147,9 +148,53 @@
   .msg.quotecard.me{align-self:flex-end; border-bottom-right-radius:5px;}
   .msg.quotecard.them{align-self:flex-start; border-bottom-left-radius:5px;}
   .msg .t{display:block; font-size:10px; opacity:.55; margin-top:3px;}
-  .chatin{display:flex; gap:8px; margin-top:12px;}
-  .chatin input{flex:1; border-radius:99px;}
+  .chatin{display:flex; gap:8px; margin-top:12px; align-items:center;}
+  .chatin input{flex:1; min-width:0; border-radius:99px;}
   .chatin button{border:none; background:var(--red); color:#fff; border-radius:99px; width:44px; height:44px; flex:none; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+
+  /* ---------- chat screen: header, scrolling log, pinned composer (iMessage-style) ---------- */
+  .chatscreen{display:flex; flex-direction:column; min-height:0; max-width:100%;}
+  .chathead{display:flex; align-items:center; gap:8px; padding:6px 0 10px; border-bottom:1px solid var(--border);}
+  .chathead .cbtn{display:inline-flex; align-items:center; gap:2px; background:none; border:none; color:var(--red);
+    font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; padding:6px 0; flex:none; max-width:40%;}
+  .chathead .cbtn span{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .chathead .who{flex:1; min-width:0; text-align:center; line-height:1.3;}
+  .chathead .who b{display:block; font-size:14.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .chathead .who span{display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .chatscroll{flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+    display:flex; flex-direction:column; gap:8px; padding:12px 0; max-height:calc(100vh - 340px);}
+  .chatscroll > *{flex:0 0 auto;}
+  .chatscroll .card{margin:0;}
+  /* Short threads sit on the bottom like iMessage; long ones still scroll normally
+     because this spacer is allowed to shrink to nothing. */
+  .chatscroll::before{content:''; flex:1 1 0; min-height:0;}
+  .chatact{display:flex; gap:8px; padding-top:8px; align-items:stretch;}
+  .chatact .btn{margin:0; min-width:0; width:auto; white-space:nowrap;}
+  .chatact .btn.ghost{flex:0 0 auto;}
+  .chatact .btn.choose{flex:1;}
+  .quotebar{display:flex; gap:7px; padding-top:8px; align-items:center;}
+  .quotebar input{flex:1; min-width:0; border-radius:11px; padding:11px;}
+  .quotebar .btn{flex:none;}
+  /* On a wide screen the composer stays put instead of jumping around with the
+     length of the conversation. */
+  @media(min-width:960px){ .chatscroll{min-height:calc(100vh - 340px);} }
+
+  @media(max-width:959px){
+    /* iOS Safari zooms the whole page in when you focus a field smaller than 16px.
+       That zoom is what made the chat overflow sideways and hide the send button. */
+    input[type=text],input[type=tel],input[type=number],input[type=email],input[type=password],textarea,select{
+      font-size:16px;}
+    body.chatmode{overflow:hidden; position:fixed; width:100%; height:100%;}
+    body.chatmode .tabbar, body.chatmode .topbar{display:none;}
+    .chatscreen{position:fixed; top:0; left:0; right:0; width:100%; height:100vh; height:100dvh;
+      background:var(--bg); padding:0 14px; z-index:40; overflow:hidden;}
+    .chathead{padding-top:calc(8px + env(safe-area-inset-top));}
+    .chatscroll{max-height:none;}
+    .chatin{margin-top:8px; padding-bottom:calc(10px + env(safe-area-inset-bottom));}
+    .chatscreen.kb .chatin{padding-bottom:8px;}
+    .chatscreen.kb .chathead{padding-top:8px;}
+    .chatact .btn, .quotebar .btn{padding:12px 10px; font-size:13px;}
+  }
   .tiles{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
   @media(min-width:960px){ .tiles{grid-template-columns:repeat(3,1fr);} }
   .tile{background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.03);}
