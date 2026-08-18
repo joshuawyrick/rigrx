@@ -332,3 +332,12 @@ CREATE TABLE IF NOT EXISTS chat_flags (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_flags_open ON chat_flags(reviewed_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_flags_provider ON chat_flags(provider_id);
+
+-- ---- languages ----
+-- The language belongs to the PERSON, not the company: one shop can have an
+-- English-speaking owner and a Spanish-speaking tech. Stored so text messages
+-- reach people in their own language even before they open the app.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT NOT NULL DEFAULT '';
+-- A company that answers dispatch calls in Spanish can say so; drivers see the
+-- badge when comparing responders — language becomes a reason to win the job.
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS spanish_dispatch BOOLEAN NOT NULL DEFAULT FALSE;

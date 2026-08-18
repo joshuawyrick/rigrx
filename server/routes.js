@@ -15,6 +15,12 @@ const EQUIP = require('./equipment');
 const guard = require('../public/guard.js');
 
 const router = express.Router();
+
+// Text messages reach people in their own language. The English string is the
+// default; pass the Spanish alongside and the recipient's saved language decides.
+function inLang(user, en, esText) {
+  return (user && user.lang === 'es' && esText) ? esText : en;
+}
 const MAX_STANDARD_SLOTS = 3;
 const MAX_TOTAL_SLOTS = 4;
 
@@ -219,12 +225,21 @@ router.post('/auth/verify', async (req, res) => {
   if (!phone) return res.status(400).json({ error: 'Enter a valid phone number' });
   const ok = await auth.verifyCode(phone, String(req.body.code || ''));
   if (!ok) return res.status(400).json({ error: 'Wrong or expired code' });
-  const user = await auth.findOrCreateUser(phone, req.body.role);
+  let user = await auth.findOrCreateUser(phone, req.body.role);
   if (user.archived_at)
     return res.status(403).json({ error: 'This account has been closed. Contact RIGRX if you think that is a mistake.' });
+  // Remember the language their phone was using, so texts arrive in it too.
+  const lang = req.body.lang === 'es' ? 'es' : 'en';
+  if (user.lang !== lang) user = await one('UPDATE users SET lang=$1 WHERE id=$2 RETURNING *', [lang, user.id]);
   const token = await auth.createSession(user.id);
   res.cookie('rigrx_session', token, { httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 3600 * 1000 });
   res.json({ user: publicUser(user) });
+});
+
+router.put('/me/lang', auth.requireAuth, async (req, res) => {
+  const lang = req.body.lang === 'es' ? 'es' : 'en';
+  await q('UPDATE users SET lang=$1 WHERE id=$2', [lang, req.user.id]);
+  res.json({ ok: true, lang });
 });
 
 router.post('/auth/logout', async (req, res) => {
@@ -236,7 +251,7 @@ router.post('/auth/logout', async (req, res) => {
 
 function publicUser(u) {
   return { id: u.id, phone: u.phone, role: u.role, name: u.name, email: u.email,
-           driver_type: u.driver_type, company: u.company,
+           driver_type: u.driver_type, company: u.company, lang: u.lang || '',
            company_id: u.company_id || null,
            member_role: u.member_role || (u.role === 'provider' ? 'owner' : ''),
            assignable: !!u.assignable,
@@ -341,10 +356,18 @@ router.post('/provider/custom-service', requireOwner, async (req, res) => {
   res.json(c);
 });
 
+// The owner flips this on when someone answering their dispatch line speaks
+// Spanish. Shown to drivers as a badge when comparing responders.
+router.post('/provider/spanish-dispatch', requireOwner, async (req, res) => {
+  const on = !!req.body.on;
+  await q('UPDATE providers SET spanish_dispatch=$1 WHERE user_id=$2', [on, companyIdOf(req.user)]);
+  res.json({ ok: true, spanish_dispatch: on });
+});
+
 router.get('/providers/:id/public', async (req, res) => {
   const p = await one(`
     SELECT p.user_id, p.name, p.hours, p.equipment, p.badges, p.jobs_won,
-           p.rating_sum, p.rating_count, p.license_verified, p.services, p.capabilities, p.primary_trade
+           p.rating_sum, p.rating_count, p.license_verified, p.services, p.capabilities, p.primary_trade, p.spanish_dispatch
     FROM providers p WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const locations = await q('SELECT label, radius_mi FROM provider_locations WHERE user_id=$1', [req.params.id]);
@@ -431,7 +454,7 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
   if (!r) return res.status(404).json({ error: 'Not found' });
   const responders = await q(`
     SELECT pu.provider_id, pu.slot, pu.premium, pu.created_at,
-           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges, p.license_verified, p.primary_trade,
+           p.name, p.rating_sum, p.rating_count, p.jobs_won, p.badges, p.license_verified, p.primary_trade, p.spanish_dispatch,
            (SELECT m.quote FROM messages m
              WHERE m.request_id=pu.request_id AND m.provider_id=pu.provider_id AND m.quote IS NOT NULL
              ORDER BY m.id DESC LIMIT 1) AS quote
@@ -720,7 +743,9 @@ router.post('/leads/:id/buy', requireDispatch, async (req, res) => {
   // tell the driver instantly
   const driver = await one('SELECT * FROM users WHERE id=$1', [r.driver_id]);
   wsPush(driver.id, 'responder', { request_id: r.id, provider_id: companyIdOf(req.user), name: p.name, slot });
-  await sms(driver.id, driver.phone, `RIGRX: ${p.name} unlocked your ${r.service_label} request and can now contact you. Open the app to chat.`);
+  await sms(driver.id, driver.phone, inLang(driver,
+    `RIGRX: ${p.name} unlocked your ${r.service_label} request and can now contact you. Open the app to chat.`,
+    `RIGRX: ${p.name} respondió a su solicitud de ${r.service_label} y ya puede contactarlo. Abra la app para chatear.`));
 
   res.json({ ok: true, slot, premium, amount_cents: amount, simulated: charge.paymentId === 'simulated' });
 });
@@ -851,7 +876,9 @@ router.post('/jobs/:id/enroute', auth.requireRole('provider'), async (req, res) 
   const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
   const p = await one('SELECT name FROM providers WHERE user_id=$1', [companyIdOf(req.user)]);
   if (d) {
-    await sms(d.id, d.phone, `RIGRX: ${p?.name || 'Your provider'} is on the way — about ${eta} min out.`);
+    await sms(d.id, d.phone, inLang(d,
+      `RIGRX: ${p?.name || 'Your provider'} is on the way — about ${eta} min out.`,
+      `RIGRX: ${p?.name || 'Su proveedor'} va en camino — a unos ${eta} min.`));
     wsPush(d.id, 'job_status', { request_id: r.id, state: 'enroute', eta_minutes: eta });
   }
   res.json({ ok: true });
@@ -866,7 +893,9 @@ router.post('/jobs/:id/late', auth.requireRole('provider'), async (req, res) => 
   const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
   const p = await one('SELECT name FROM providers WHERE user_id=$1', [companyIdOf(req.user)]);
   if (d) {
-    await sms(d.id, d.phone, `RIGRX: ${p?.name || 'Your provider'} updated their ETA — about ${eta} min out.`);
+    await sms(d.id, d.phone, inLang(d,
+      `RIGRX: ${p?.name || 'Your provider'} updated their ETA — about ${eta} min out.`,
+      `RIGRX: ${p?.name || 'Su proveedor'} actualizó su tiempo de llegada — a unos ${eta} min.`));
     wsPush(d.id, 'job_status', { request_id: r.id, state: 'late', eta_minutes: eta });
   }
   res.json({ ok: true });
@@ -887,7 +916,9 @@ router.post('/jobs/:id/complete', auth.requireRole('provider'), async (req, res)
            arrived_at = COALESCE(arrived_at, NOW()) WHERE id=$1`, [r.id]);
   const d = await one('SELECT id, phone FROM users WHERE id=$1', [r.driver_id]);
   if (d) {
-    await sms(d.id, d.phone, 'RIGRX: Job marked complete. Tap to rate how it went — it takes 10 seconds.');
+    await sms(d.id, d.phone, inLang(d,
+      'RIGRX: Job marked complete. Tap to rate how it went — it takes 10 seconds.',
+      'RIGRX: Trabajo completado. Toque para calificar cómo le fue — toma 10 segundos.'));
     wsPush(d.id, 'job_status', { request_id: r.id, state: 'completed' });
   }
   res.json({ ok: true });
@@ -959,18 +990,23 @@ router.post('/provider/members', requireOwner, async (req, res) => {
 
   const locId = Number(req.body.member_location_id) || null;
   const assignable = req.body.assignable !== false;   // techs are assignable by default
+  // The invite text is this person's first contact with RIGRX — before any phone
+  // detection can happen — so the owner says what language they speak.
+  const mlang = req.body.lang === 'es' ? 'es' : 'en';
   const u = existing
     ? await one(`UPDATE users SET name=$1, role='provider', company_id=$2, member_role=$3,
-                 assignable=$4, member_location_id=$5, archived_at=NULL WHERE id=$6 RETURNING *`,
-                [name, cid, role, assignable, locId, existing.id])
-    : await one(`INSERT INTO users (phone, role, name, company_id, member_role, assignable, member_location_id)
-                 VALUES ($1,'provider',$2,$3,$4,$5,$6) RETURNING *`,
-                [phone, name, cid, role, assignable, locId]);
+                 assignable=$4, member_location_id=$5, lang=$6, archived_at=NULL WHERE id=$7 RETURNING *`,
+                [name, cid, role, assignable, locId, mlang, existing.id])
+    : await one(`INSERT INTO users (phone, role, name, company_id, member_role, assignable, member_location_id, lang)
+                 VALUES ($1,'provider',$2,$3,$4,$5,$6,$7) RETURNING *`,
+                [phone, name, cid, role, assignable, locId, mlang]);
 
   const company = await one('SELECT name FROM providers WHERE user_id=$1', [cid]);
-  await sms(u.id, u.phone,
-    `RIGRX: ${company?.name || 'Your company'} added you as ${role === 'tech' ? 'a technician' : 'a dispatcher'}. ` +
-    `Sign in with this number — no password needed. ${process.env.BASE_URL || ''}`);
+  await sms(u.id, u.phone, mlang === 'es'
+    ? `RIGRX: ${company?.name || 'Su compañía'} lo agregó como ${role === 'tech' ? 'técnico' : 'despachador'}. ` +
+      `Inicie sesión con este número — sin contraseña. ${process.env.BASE_URL || ''}`
+    : `RIGRX: ${company?.name || 'Your company'} added you as ${role === 'tech' ? 'a technician' : 'a dispatcher'}. ` +
+      `Sign in with this number — no password needed. ${process.env.BASE_URL || ''}`);
   res.json({ ok: true, member: { id: u.id, name: u.name, phone: u.phone, member_role: u.member_role } });
 });
 
@@ -1028,7 +1064,9 @@ router.post('/admin/users/:id/archive', auth.requireRole('admin'), async (req, r
     for (const r of open) {
       if (!r.selected_provider) continue;
       const pu = await one('SELECT u.phone, u.id FROM users u WHERE u.id=$1', [r.selected_provider]);
-      if (pu) await sms(pu.id, pu.phone, `RIGRX: Request #${r.id} has been closed and is no longer active.`);
+      if (pu) await sms(pu.id, pu.phone, inLang(pu,
+        `RIGRX: Request #${r.id} has been closed and is no longer active.`,
+        `RIGRX: La solicitud #${r.id} fue cerrada y ya no está activa.`));
     }
   }
   res.json({ ok: true, cancelled_requests: cancelled });

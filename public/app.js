@@ -11,10 +11,10 @@ function toast(msg){
 }
 function timeAgo(ts){
   const m = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
-  if (m < 1) return 'just now';
-  if (m < 60) return m + ' min ago';
+  if (m < 1) return T('just now');
+  if (m < 60) return T('{n} min ago', { n: m });
   const h = Math.round(m / 60);
-  return h < 24 ? h + ' hr ago' : Math.round(h / 24) + ' d ago';
+  return h < 24 ? T('{n} hr ago', { n: h }) : T('{n} d ago', { n: Math.round(h / 24) });
 }
 async function api(method, url, body){
   const res = await fetch('/api' + url, {
@@ -22,12 +22,15 @@ async function api(method, url, body){
     body: body ? JSON.stringify(body) : undefined
   });
   const data = await res.json().catch(()=>({}));
-  if (!res.ok) { toast(data.error || 'Request failed'); throw new Error(data.error || res.status); }
+  if (!res.ok) { toast(data.error || T('Request failed')); throw new Error(data.error || res.status); }
   return data;
 }
 function tog(el){ el.classList.toggle('sel'); }
 function togOne(el){ [...el.parentElement.children].forEach(c=>c.classList.remove('sel')); el.classList.add('sel'); }
-function selOf(groupId){ const g = $(groupId); return g ? [...g.querySelectorAll('.chip.sel')].map(c=>c.textContent.trim()) : []; }
+function selOf(groupId){ const g = $(groupId); return g ? [...g.querySelectorAll('.chip.sel')].map(chipVal) : []; }
+// A translated chip shows Spanish but stores English, so the data the providers
+// and the matching engine see never depends on the driver's language.
+function chipVal(c){ return c.dataset.en || c.textContent.trim(); }
 const qv = id => { const el = $(id); return el ? el.value : ''; };
 
 /* ---------------- state & router ---------------- */
@@ -38,6 +41,17 @@ const S = {
   leadId: null, simulatedPayments: true, catalog: [], trades: [], equipment: {}, dutyClass: 'heavy',
   chatBack: null, chatDraft: '', chatCtx: null, guardWaived: false, keepChatFocus: false, flagsAll: false
 };
+/* ---------------- language ---------------- */
+function toggleLang(){
+  S.langTouched = true;
+  setLang(getLang() === 'es' ? 'en' : 'es');
+  if (S.me) api('PUT', '/me/lang', { lang: getLang() }).catch(()=>{});
+  render();
+}
+// One tap on the sign-in screen; also lives in the sidebar/topbar for drivers.
+function langToggle(){
+  return `<div style="text-align:center; margin-top:14px"><a onclick="toggleLang()" style="font-size:13px">${getLang() === 'es' ? 'View in English' : 'Ver en español'}</a></div>`;
+}
 async function loadCatalog(){
   try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
   try { S.trades = await api('GET', '/trades'); } catch(e){ S.trades = []; }
@@ -50,6 +64,9 @@ const svcIconFor = k => catByKey(k)?.icon || 'box';
 async function loadMe(){
   const d = await api('GET', '/me');
   S.me = d.user; S.provider = d.provider || null;
+  // The account remembers its language, so a driver who set Spanish on his phone
+  // sees Spanish when he signs in from a tablet too. A toggle this session wins.
+  if (d.user?.lang && !S.langTouched && d.user.lang !== getLang()) setLang(d.user.lang);
   S.trucks = d.trucks || []; S.trailers = d.trailers || [];
   S.simulatedPayments = !!d.simulatedPayments;
 }
@@ -103,29 +120,30 @@ function connectWS(){
 function authShell(inner, wide){
   return `<div class="authwrap"><div class="authcard${wide?' wide':''}">
     <div class="logo-lg">RIG<span>RX</span></div>
-    <div class="tagline">Emergency roadside help for trucks — fast.</div>
+    <div class="tagline">${T('Emergency roadside help for trucks — fast.')}</div>
     ${inner}</div></div>`;
 }
 function vSignin(){
   return authShell(`
   <div class="card" style="padding:20px">
-    <span class="sec">Sign in or create an account</span>
-    <label class="f">Mobile number</label>
+    <span class="sec">${T('Sign in or create an account')}</span>
+    <label class="f">${T('Mobile number')}</label>
     <input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel"
       inputmode="tel" enterkeyhint="go" onkeydown="if(event.key==='Enter')sendCode()">
-    <label class="f">I am a…</label>
+    <label class="f">${T('I am a…')}</label>
     <div class="chips" id="si-role">
-      <span class="chip sel" onclick="togOne(this)">Truck driver</span>
-      <span class="chip" onclick="togOne(this)">Service company</span>
+      <span class="chip sel" data-en="Truck driver" onclick="togOne(this)">${T('Truck driver')}</span>
+      <span class="chip" data-en="Service company" onclick="togOne(this)">${T('Service company')}</span>
     </div>
     <div style="height:14px"></div>
-    <button class="btn" onclick="requestCode()">${ic('mobile',16)} Text me a code</button>
+    <button class="btn" onclick="requestCode()">${ic('mobile',16)} ${T('Text me a code')}</button>
   </div>
-  <div class="faint" style="text-align:center; line-height:1.6">Your number is your account — no passwords.<br>New numbers create an account; existing ones sign in.</div>`);
+  <div class="faint" style="text-align:center; line-height:1.6">${T('Your number is your account — no passwords.')}<br>${T('New numbers create an account; existing ones sign in.')}</div>
+  ${langToggle()}`);
 }
 async function requestCode(){
   const phone = qv('si-phone').trim();
-  if (!phone) return toast('Enter your mobile number');
+  if (!phone) return toast(T('Enter your mobile number'));
   const role = selOf('si-role')[0] === 'Service company' ? 'provider' : 'driver';
   const d = await api('POST', '/auth/request-code', { phone });
   S.pendingPhone = phone; S.pendingRole = role; S.devCode = d.devCode || null;
@@ -133,24 +151,25 @@ async function requestCode(){
 }
 function vCode(){
   return authShell(`
-  <button class="back" onclick="nav('signin')">${ic('chevL',15)} Back</button>
+  <button class="back" onclick="nav('signin')">${ic('chevL',15)} ${T('Back')}</button>
   <div class="card" style="padding:24px; text-align:center; margin-top:10px">
-    <span class="sec">Enter the code we texted you</span>
+    <span class="sec">${T('Enter the code we texted you')}</span>
     <div style="margin:18px 0 6px">
       <input type="text" id="si-code" inputmode="numeric" maxlength="6" placeholder="••••••"
         autocomplete="one-time-code" enterkeyhint="go" autofocus
         style="width:180px; text-align:center; font-size:24px; font-weight:800; letter-spacing:8px"
         oninput="onCodeInput(this)" onkeydown="if(event.key==='Enter')verifyCode()">
     </div>
-    <div class="faint">Sent to ${esc(S.pendingPhone)} · <a onclick="requestCodeAgain()">Resend</a></div>
+    <div class="faint">${T('Sent to')} ${esc(S.pendingPhone)} · <a onclick="requestCodeAgain()">${T('Resend')}</a></div>
     ${S.devCode ? `<div class="card alert" style="margin-top:14px"><div class="mini">${ic('zap',13)} <b class="k">Test mode</b> (no Twilio keys yet) — your code is <b class="k" style="letter-spacing:3px">${esc(S.devCode)}</b></div></div>` : ''}
     <div style="height:12px"></div>
-    <button class="btn" onclick="verifyCode()">${ic('check',16)} Verify & continue</button>
-  </div>`);
+    <button class="btn" onclick="verifyCode()">${ic('check',16)} ${T('Verify & continue')}</button>
+  </div>
+  ${langToggle()}`);
 }
 async function requestCodeAgain(){
   const d = await api('POST', '/auth/request-code', { phone: S.pendingPhone });
-  S.devCode = d.devCode || null; toast('Code re-sent'); render();
+  S.devCode = d.devCode || null; toast(T('Code re-sent')); render();
 }
 function onCodeInput(el){
   const digits = el.value.replace(/\D/g, '').slice(0, 6);
@@ -159,8 +178,8 @@ function onCodeInput(el){
 }
 async function verifyCode(){
   const code = qv('si-code').trim();
-  if (code.length < 4) return toast('Enter the 6-digit code');
-  await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole });
+  if (code.length < 4) return toast(T('Enter the 6-digit code'));
+  await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole, lang: getLang() });
   await loadMe();
   connectWS();
   nav(homeFor());
@@ -182,11 +201,11 @@ function sel(id, options, current, opts = {}){
   const isOther = current && !known;
   return `
   <select id="${id}" onchange="onSelChange('${id}')" data-field="${opts.field || id}">
-    <option value="">${opts.placeholder || 'Select…'}</option>
+    <option value="">${T(opts.placeholder || 'Select…')}</option>
     ${list.map(o=>`<option ${o===current?'selected':''}>${esc(o)}</option>`).join('')}
-    <option value="__other" ${isOther?'selected':''}>Other…</option>
+    <option value="__other" ${isOther?'selected':''}>${T('Other…')}</option>
   </select>
-  <input type="text" id="${id}-other" placeholder="${opts.otherPlaceholder || 'Type it in'}"
+  <input type="text" id="${id}-other" placeholder="${T(opts.otherPlaceholder || 'Type it in')}"
     value="${isOther?esc(current):''}" style="margin-top:7px; display:${isOther?'block':'none'}">`;
 }
 function onSelChange(id){
@@ -225,8 +244,8 @@ const isSetUpProvider = () => !!(S.provider && S.provider.name);
 function setupTop(backView, backLabel, homeView){
   return `
   <div class="row" style="align-items:center; margin:0 0 18px">
-    ${backView ? `<button class="back" style="margin:0" onclick="nav('${backView}')">${ic('chevL',15)} ${backLabel || 'Back'}</button>` : '<span></span>'}
-    ${homeView ? `<button class="back" style="margin:0" onclick="nav('${homeView}')">${ic('home',15)} Done — go home</button>` : ''}
+    ${backView ? `<button class="back" style="margin:0" onclick="nav('${backView}')">${ic('chevL',15)} ${T(backLabel || 'Back')}</button>` : '<span></span>'}
+    ${homeView ? `<button class="back" style="margin:0" onclick="nav('${homeView}')">${ic('home',15)} ${T('Done — go home')}</button>` : ''}
   </div>`;
 }
 
@@ -234,20 +253,20 @@ function vDSetup1(){
   return authShell(`
   ${isSetUpDriver() ? setupTop(null, null, 'd-home') : ''}
   ${progress(1,3)}
-  <h2 class="scr">Welcome — let's set you up</h2>
-  <p class="scrsub">Step 1 of 3 · about 2 minutes. Broke down right now? <a onclick="nav('d-home')">Skip, request help first</a></p>
-  <label class="f">Full name</label><input type="text" id="su-name" value="${esc(S.me?.name)}">
-  <label class="f">Email (receipts & updates)</label><input type="text" id="su-email" value="${esc(S.me?.email)}">
-  <label class="f">I am a…</label>
+  <h2 class="scr">${T("Welcome — let's set you up")}</h2>
+  <p class="scrsub">${T('Step 1 of 3 · about 2 minutes. Broke down right now?')} <a onclick="nav('d-home')">${T('Skip, request help first')}</a></p>
+  <label class="f">${T('Full name')}</label><input type="text" id="su-name" value="${esc(S.me?.name)}">
+  <label class="f">${T('Email (receipts & updates)')}</label><input type="text" id="su-email" value="${esc(S.me?.email)}">
+  <label class="f">${T('I am a…')}</label>
   <div class="chips" id="su-type">
-    ${['Owner-operator','Company driver','Fleet dispatcher'].map((t,i)=>`<span class="chip ${ (S.me?.driver_type||'Owner-operator')===t?'sel':''}" onclick="togOne(this)">${t}</span>`).join('')}
+    ${['Owner-operator','Company driver','Fleet dispatcher'].map((t,i)=>`<span class="chip ${ (S.me?.driver_type||'Owner-operator')===t?'sel':''}" data-en="${t}" onclick="togOne(this)">${T(t)}</span>`).join('')}
   </div>
-  <label class="f">Company & MC/DOT # (optional)</label><input type="text" id="su-company" value="${esc(S.me?.company)}">
+  <label class="f">${T('Company & MC/DOT # (optional)')}</label><input type="text" id="su-company" value="${esc(S.me?.company)}">
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveDSetup1()">Continue ${ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="saveDSetup1()">${T('Continue')} ${ic('arrowR',15)}</button>`);
 }
 async function saveDSetup1(){
-  if (!qv('su-name').trim()) return toast('Enter your name');
+  if (!qv('su-name').trim()) return toast(T('Enter your name'));
   const d = await api('PUT', '/driver/profile', {
     name: qv('su-name'), email: qv('su-email'),
     driver_type: selOf('su-type')[0] || 'Owner-operator', company: qv('su-company') });
@@ -265,11 +284,11 @@ function setDutyClass(cls){
 function dutyPicker(current){
   const list = EQ().DUTY_CLASSES || [];
   return `
-  <label class="f">What size truck is this?</label>
+  <label class="f">${T('What size truck is this?')}</label>
   <div class="dutyrow">
     ${list.map(d=>`
     <div class="dutycard ${d.key===current?'sel':''}" onclick="setDutyClass('${d.key}')">
-      <b>${esc(d.label)}</b><span>${esc(d.blurb)}</span>
+      <b>${esc(T(d.label))}</b><span>${esc(T(d.blurb))}</span>
     </div>`).join('')}
   </div>`;
 }
@@ -287,37 +306,37 @@ function truckForm(t = {}){
   return `
   ${dutyPicker(cls)}
   <div class="grid2">
-    <div><label class="f">Unit #</label><input type="text" id="tk-unit" value="${esc(t.unit)}" placeholder="Optional"></div>
-    <div><label class="f">Year</label>${sel('tk-year', yrs, t.year, { placeholder: 'Select year…', field: 'truck_year' })}</div>
+    <div><label class="f">${T('Unit #')}</label><input type="text" id="tk-unit" value="${esc(t.unit)}" placeholder="${T('Optional')}"></div>
+    <div><label class="f">${T('Year')}</label>${sel('tk-year', yrs, t.year, { placeholder: 'Select year…', field: 'truck_year' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Make</label>
+    <div><label class="f">${T('Make')}</label>
       <select id="tk-make" onchange="onMakeChange()" data-field="truck_make">
-        <option value="">Select make…</option>
+        <option value="">${T('Select make…')}</option>
         ${forClass(EQ().MAKES, cls).map(m=>`<option ${m===t.make?'selected':''}>${esc(m)}</option>`).join('')}
-        <option value="__other" ${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'selected':''}>Other…</option>
+        <option value="__other" ${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'selected':''}>${T('Other…')}</option>
       </select>
-      <input type="text" id="tk-make-other" placeholder="Type the make"
+      <input type="text" id="tk-make-other" placeholder="${T('Type the make')}"
         value="${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? esc(t.make) : ''}"
         style="margin-top:7px; display:${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'block':'none'}">
     </div>
-    <div><label class="f">Model</label><div id="tk-model-wrap">${sel('tk-model', modelOptions(t.make), t.model, { placeholder: 'Select model…', field: 'truck_model' })}</div></div>
+    <div><label class="f">${T('Model')}</label><div id="tk-model-wrap">${sel('tk-model', modelOptions(t.make), t.model, { placeholder: 'Select model…', field: 'truck_model' })}</div></div>
   </div>
   <div class="grid2">
-    <div><label class="f">Engine</label>${sel('tk-engine', forClass(EQ().ENGINES, cls), t.engine, { placeholder: 'Select engine…', field: 'truck_engine' })}</div>
-    <div><label class="f">Transmission</label>${sel('tk-trans', forClass(EQ().TRANSMISSIONS, cls), t.trans, { placeholder: 'Select transmission…', field: 'truck_trans' })}</div>
+    <div><label class="f">${T('Engine')}</label>${sel('tk-engine', forClass(EQ().ENGINES, cls), t.engine, { placeholder: 'Select engine…', field: 'truck_engine' })}</div>
+    <div><label class="f">${T('Transmission')}</label>${sel('tk-trans', forClass(EQ().TRANSMISSIONS, cls), t.trans, { placeholder: 'Select transmission…', field: 'truck_trans' })}</div>
   </div>
-  <label class="f">Axle configuration</label>${sel('tk-axles', forClass(EQ().AXLE_CONFIGS, cls), t.axles, { placeholder: 'Select axles…', field: 'truck_axles' })}
+  <label class="f">${T('Axle configuration')}</label>${sel('tk-axles', forClass(EQ().AXLE_CONFIGS, cls), t.axles, { placeholder: 'Select axles…', field: 'truck_axles' })}
   <div class="grid2">
-    <div><label class="f">Steer tire size</label>${sel('tk-steer', forClass(EQ().TIRE_SIZES, cls), t.steer, { placeholder: 'Select size…', field: 'steer_tire', otherPlaceholder: 'e.g. 295/75R22.5' })}</div>
-    <div><label class="f">Drive tire size</label>${sel('tk-drive', forClass(EQ().TIRE_SIZES, cls), t.drive, { placeholder: 'Select size…', field: 'drive_tire', otherPlaceholder: 'e.g. 11R24.5' })}</div>
+    <div><label class="f">${T('Steer tire size')}</label>${sel('tk-steer', forClass(EQ().TIRE_SIZES, cls), t.steer, { placeholder: 'Select size…', field: 'steer_tire', otherPlaceholder: 'e.g. 295/75R22.5' })}</div>
+    <div><label class="f">${T('Drive tire size')}</label>${sel('tk-drive', forClass(EQ().TIRE_SIZES, cls), t.drive, { placeholder: 'Select size…', field: 'drive_tire', otherPlaceholder: 'e.g. 11R24.5' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Wheels</label>${sel('tk-wheels', EQ().WHEEL_TYPES || [], t.wheels, { placeholder: 'Select…', field: 'wheels' })}</div>
-    <div><label class="f">Color</label>${sel('tk-color', EQ().TRUCK_COLORS || [], t.color, { placeholder: 'Select color…', field: 'truck_color' })}</div>
+    <div><label class="f">${T('Wheels')}</label>${sel('tk-wheels', EQ().WHEEL_TYPES || [], t.wheels, { placeholder: 'Select…', field: 'wheels' })}</div>
+    <div><label class="f">${T('Color')}</label>${sel('tk-color', EQ().TRUCK_COLORS || [], t.color, { placeholder: 'Select color…', field: 'truck_color' })}</div>
   </div>
-  <label class="f">VIN (optional — speeds up parts)</label><input type="text" id="tk-vin" value="${esc(t.vin)}">
-  <label class="f">Extras (optional)</label>
+  <label class="f">${T('VIN (optional — speeds up parts)')}</label><input type="text" id="tk-vin" value="${esc(t.vin)}">
+  <label class="f">${T('Extras (optional)')}</label>
   <div class="chips" id="tk-extras">
     ${(EQ().TRUCK_EXTRAS || []).map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" onclick="tog(this)">${esc(e)}</span>`).join('')}
   </div>`;
@@ -336,20 +355,20 @@ function vDSetup2(){
     ? setupTop('d-garage', 'My Garage', 'd-home')
     : setupTop('d-setup1', 'Back')}
   ${progress(2,3)}
-  <h2 class="scr">Add your truck</h2>
-  <p class="scrsub">Step 2 of 3 — every detail here saves a question at 2 AM</p>
+  <h2 class="scr">${T('Add your truck')}</h2>
+  <p class="scrsub">${T('Step 2 of 3 — every detail here saves a question at 2 AM')}</p>
   ${truckForm(S.editTruck || {})}
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveDSetup2()">${isSetUpDriver() ? ic('check',16) + ' Save truck' : 'Continue ' + ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="saveDSetup2()">${isSetUpDriver() ? ic('check',16) + ' ' + T('Save truck') : T('Continue') + ' ' + ic('arrowR',15)}</button>`);
 }
 async function saveDSetup2(){
   const data = readTruckForm();
-  if (!data.make) return toast('At least enter the make');
+  if (!data.make) return toast(T('At least enter the make'));
   const wasSetUp = isSetUpDriver();
   if (S.editTruck?.id) await api('PUT', '/trucks/' + S.editTruck.id, { data });
   else await api('POST', '/trucks', { data });
   await loadMe();
-  if (wasSetUp) { toast('Truck saved'); S.editTruck = null; return nav('d-garage'); }
+  if (wasSetUp) { toast(T('Truck saved')); S.editTruck = null; return nav('d-garage'); }
   nav('d-setup3');
 }
 function trailerForm(r = {}){
@@ -358,32 +377,32 @@ function trailerForm(r = {}){
   const allTires = [...new Set([].concat(
     forClass(EQ().TIRE_SIZES, 'heavy'), forClass(EQ().TIRE_SIZES, 'medium'), forClass(EQ().TIRE_SIZES, 'light')))];
   return `
-  <label class="f">Trailer type</label>
+  <label class="f">${T('Trailer type')}</label>
   ${sel('tr-type', EQ().TRAILER_TYPES || [], r.type, { placeholder: 'Select trailer type…', field: 'trailer_type' })}
   <div class="grid2">
-    <div><label class="f">Trailer #</label><input type="text" id="tr-num" value="${esc(r.num)}" placeholder="Optional"></div>
-    <div><label class="f">Length</label>${sel('tr-len', EQ().TRAILER_LENGTHS || [], r.len, { placeholder: 'Select length…', field: 'trailer_length' })}</div>
+    <div><label class="f">${T('Trailer #')}</label><input type="text" id="tr-num" value="${esc(r.num)}" placeholder="${T('Optional')}"></div>
+    <div><label class="f">${T('Length')}</label>${sel('tr-len', EQ().TRAILER_LENGTHS || [], r.len, { placeholder: 'Select length…', field: 'trailer_length' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Axles</label>${sel('tr-axles', EQ().TRAILER_AXLES || [], r.axles, { placeholder: 'Select…', field: 'trailer_axles' })}</div>
-    <div><label class="f">Suspension</label>${sel('tr-susp', EQ().SUSPENSIONS || [], r.susp, { placeholder: 'Select…', field: 'trailer_susp' })}</div>
+    <div><label class="f">${T('Axles')}</label>${sel('tr-axles', EQ().TRAILER_AXLES || [], r.axles, { placeholder: 'Select…', field: 'trailer_axles' })}</div>
+    <div><label class="f">${T('Suspension')}</label>${sel('tr-susp', EQ().SUSPENSIONS || [], r.susp, { placeholder: 'Select…', field: 'trailer_susp' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Tire size</label>${sel('tr-tires', allTires, r.tires, { placeholder: 'Select size…', field: 'trailer_tire' })}</div>
-    <div><label class="f">Reefer unit (if reefer)</label>${sel('tr-reefer', EQ().REEFER_MAKES || [], r.reefer, { placeholder: 'Not a reefer', field: 'reefer_make' })}</div>
+    <div><label class="f">${T('Tire size')}</label>${sel('tr-tires', allTires, r.tires, { placeholder: 'Select size…', field: 'trailer_tire' })}</div>
+    <div><label class="f">${T('Reefer unit (if reefer)')}</label>${sel('tr-reefer', EQ().REEFER_MAKES || [], r.reefer, { placeholder: 'Not a reefer', field: 'reefer_make' })}</div>
   </div>
   <div class="grid2">
-    <div><label class="f">Doors</label>${sel('tr-doors', EQ().DOOR_TYPES || [], r.doors, { placeholder: 'Select…', field: 'trailer_doors' })}</div>
-    <div><label class="f">Liftgate</label>${sel('tr-liftgate', ['No','Yes'], r.liftgate, { placeholder: 'Select…', field: 'liftgate' })}</div>
+    <div><label class="f">${T('Doors')}</label>${sel('tr-doors', EQ().DOOR_TYPES || [], r.doors, { placeholder: 'Select…', field: 'trailer_doors' })}</div>
+    <div><label class="f">${T('Liftgate')}</label>${sel('tr-liftgate', ['No','Yes'], r.liftgate, { placeholder: 'Select…', field: 'liftgate' })}</div>
   </div>
   <div class="card alert" style="margin-top:12px">
-    <div class="row"><span class="mini k">${ic('warn',15)} Hazmat placarded</span>
-      <span class="chips" id="tr-hz"><span class="chip ${r.hazmat?'sel':''}" onclick="togOne(this)">Yes</span><span class="chip ${r.hazmat?'':'sel'}" onclick="togOne(this)">No</span></span></div>
+    <div class="row"><span class="mini k">${ic('warn',15)} ${T('Hazmat placarded')}</span>
+      <span class="chips" id="tr-hz"><span class="chip ${r.hazmat?'sel':''}" data-en="Yes" onclick="togOne(this)">${T('Yes')}</span><span class="chip ${r.hazmat?'':'sel'}" data-en="No" onclick="togOne(this)">${T('No')}</span></span></div>
     <div class="grid2" style="margin-top:8px">
-      <div><label class="f" style="margin-top:0">Class</label>${sel('tr-class', EQ().HAZMAT_CLASSES || [], r.hzClass, { placeholder: 'Select class…', field: 'hazmat_class' })}</div>
-      <div><label class="f" style="margin-top:0">UN #</label><input type="text" id="tr-un" value="${esc(r.un)}" placeholder="1267"></div>
+      <div><label class="f" style="margin-top:0">${T('Class')}</label>${sel('tr-class', EQ().HAZMAT_CLASSES || [], r.hzClass, { placeholder: 'Select class…', field: 'hazmat_class' })}</div>
+      <div><label class="f" style="margin-top:0">${T('UN #')}</label><input type="text" id="tr-un" value="${esc(r.un)}" placeholder="1267"></div>
     </div>
-    <div class="faint" style="margin-top:7px">Providers see this before they buy — tow operators must know</div>
+    <div class="faint" style="margin-top:7px">${T('Providers see this before they buy — tow operators must know')}</div>
   </div>`;
 }
 function readTrailerForm(){
@@ -398,13 +417,13 @@ function vDSetup3(){
     ? setupTop('d-garage', 'My Garage', 'd-home')
     : setupTop('d-setup2', 'Back')}
   ${progress(3,3)}
-  <h2 class="scr">Add your trailer</h2>
-  <p class="scrsub">Step 3 of 3 — you can add more rigs anytime in My Garage</p>
+  <h2 class="scr">${T('Add your trailer')}</h2>
+  <p class="scrsub">${T('Step 3 of 3 — you can add more rigs anytime in My Garage')}</p>
   ${trailerForm(S.editTrailer || {})}
   <div style="height:8px"></div>
-  <button class="btn" onclick="saveDSetup3()">${ic('check',16)} ${isSetUpDriver() ? 'Save trailer' : 'Finish — go to my dashboard'}</button>
+  <button class="btn" onclick="saveDSetup3()">${ic('check',16)} ${T(isSetUpDriver() ? 'Save trailer' : 'Finish — go to my dashboard')}</button>
   <div style="height:8px"></div>
-  <button class="btn ghost" onclick="nav(isSetUpDriver() ? 'd-garage' : 'd-home')">${isSetUpDriver() ? 'Cancel' : 'Skip — no trailer / bobtail'}</button>`);
+  <button class="btn ghost" onclick="nav(isSetUpDriver() ? 'd-garage' : 'd-home')">${T(isSetUpDriver() ? 'Cancel' : 'Skip — no trailer / bobtail')}</button>`);
 }
 async function saveDSetup3(){
   const data = readTrailerForm();
@@ -414,8 +433,8 @@ async function saveDSetup3(){
     else await api('POST', '/trailers', { data });
   }
   await loadMe();
-  if (wasSetUp) { toast('Trailer saved'); S.editTrailer = null; return nav('d-garage'); }
-  toast('Profile complete — your garage is ready');
+  if (wasSetUp) { toast(T('Trailer saved')); S.editTrailer = null; return nav('d-garage'); }
+  toast(T('Profile complete — your garage is ready'));
   nav('d-home');
 }
 /* ---------------- driver app ---------------- */
@@ -426,23 +445,23 @@ async function vDHome(){
   const open = mine.filter(r => ['open','selected'].includes(r.status));
   const t = S.trucks[0]?.data, r = S.trailers[0]?.data;
   return `
-  <h2 class="scr lg">Hey ${esc((S.me.name || 'driver').split(' ')[0])}</h2>
-  <p class="scrsub">Broke down? Help is minutes away.</p>
-  <button class="btn big" onclick="startRequest()">${ic('zap',18)} REQUEST HELP NOW</button>
+  <h2 class="scr lg">${T('Hey')} ${esc((S.me.name || 'driver').split(' ')[0])}</h2>
+  <p class="scrsub">${T('Broke down? Help is minutes away.')}</p>
+  <button class="btn big" onclick="startRequest()">${ic('zap',18)} ${T('REQUEST HELP NOW')}</button>
   <div style="height:14px"></div>
   ${open.map(x=>`<div class="card click" onclick="nav('d-active',{activeRequestId:${x.id}})">
-    <div class="row"><span class="mini k">${ic(svcIcon(x.service_key),15)} &nbsp;Request #${x.id} — ${esc(x.service_label)} · ${x.buyer_count} responder${x.buyer_count===1?'':'s'}</span>
-    <span class="pill ${x.status==='open'?'red':'dark'}">${x.status.toUpperCase()}</span></div></div>`).join('')}
+    <div class="row"><span class="mini k">${ic(svcIcon(x.service_key),15)} &nbsp;${T('Request #')}${x.id} — ${esc(T(x.service_label))} · ${TN(x.buyer_count,'{n} responder','{n} responders')}</span>
+    <span class="pill ${x.status==='open'?'red':'dark'}">${T(x.status.toUpperCase())}</span></div></div>`).join('')}
   <div class="cols2"><div>
   <div class="card">
-    <div class="row"><span class="sec">My Garage</span><span class="faint" style="cursor:pointer" onclick="nav('d-garage')">Manage ›</span></div>
-    ${t ? `<div class="checkrow"><span class="cico on">${ic('truck')}</span><div><b class="mini k">Unit ${esc(t.unit)} — ${esc(t.year)} ${esc(t.make)} ${esc(t.model)}</b><div class="faint">${esc(t.engine)} · ${esc(t.axles)} · ${esc(t.color)}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('truck')}</span><div class="mini"><a onclick="S.editTruck=null; nav('d-setup2')">Add your truck ›</a></div></div>`}
-    ${r ? `<div class="checkrow"><span class="cico on">${ic('trailer')}</span><div><b class="mini k">Trailer ${esc(r.num)} — ${esc(r.type)}</b><div class="faint">${r.hazmat ? 'Hazmat: Class '+esc(r.hzClass)+' · UN '+esc(r.un) : 'No hazmat'}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('trailer')}</span><div class="mini"><a onclick="S.editTrailer=null; nav('d-setup3')">Add your trailer ›</a></div></div>`}
+    <div class="row"><span class="sec">${T('My Garage')}</span><span class="faint" style="cursor:pointer" onclick="nav('d-garage')">${T('Manage ›')}</span></div>
+    ${t ? `<div class="checkrow"><span class="cico on">${ic('truck')}</span><div><b class="mini k">${T('Unit')} ${esc(t.unit)} — ${esc(t.year)} ${esc(t.make)} ${esc(t.model)}</b><div class="faint">${esc(t.engine)} · ${esc(t.axles)} · ${esc(t.color)}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('truck')}</span><div class="mini"><a onclick="S.editTruck=null; nav('d-setup2')">${T('Add your truck ›')}</a></div></div>`}
+    ${r ? `<div class="checkrow"><span class="cico on">${ic('trailer')}</span><div><b class="mini k">${T('Trailer')} ${esc(r.num)} — ${esc(r.type)}</b><div class="faint">${r.hazmat ? T('Hazmat: Class')+' '+esc(r.hzClass)+' · UN '+esc(r.un) : T('No hazmat')}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('trailer')}</span><div class="mini"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('Add your trailer ›')}</a></div></div>`}
   </div></div><div>
   <div class="card">
-    <span class="sec">History</span>
+    <span class="sec">${T('History')}</span>
     ${mine.filter(x=>['completed','cancelled'].includes(x.status)).slice(0,5).map(x=>`
-      <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(x.service_label)}</b><div class="faint">${timeAgo(x.created_at)} · ${x.status}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No past requests yet</div>'}
+      <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(T(x.service_label))}</b><div class="faint">${timeAgo(x.created_at)} · ${T(x.status)}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No past requests yet')}</div>`}
   </div></div></div>`;
 }
 function startRequest(){
@@ -456,17 +475,17 @@ function startRequest(){
 function vDRequest(){
   const cats = (S.catalog || []).filter(c => c.driver_visible);
   return `
-  <h2 class="scr">What do you need?</h2>
-  <p class="scrsub">Step 1 of 4 — pick a service</p>
+  <h2 class="scr">${T('What do you need?')}</h2>
+  <p class="scrsub">${T('Step 1 of 4 — pick a service')}</p>
   <div class="grid2s">
     ${cats.map(c=>`<div class="svc" onclick="pickSvc('${c.key}')">
-      <div class="em">${ic(c.icon,26)}</div><div class="nm">${esc(c.label)}</div><div class="ds">${esc(c.blurb)}</div></div>`).join('')
-      || '<div class="card"><span class="muted">No services available yet</span></div>'}
+      <div class="em">${ic(c.icon,26)}</div><div class="nm">${esc(T(c.label))}</div><div class="ds">${esc(T(c.blurb))}</div></div>`).join('')
+      || `<div class="card"><span class="muted">${T('No services available yet')}</span></div>`}
   </div>`;
 }
 function pickSvc(key){
   const c = catByKey(key);
-  if (!c) return toast('That service is unavailable');
+  if (!c) return toast(T('That service is unavailable'));
   if (!S.draft) startRequest();
   S.draft.service_key = key; S.draft.service_label = c.label; S.draft.icon = c.icon;
   S.draft.service_item = '';
@@ -476,47 +495,47 @@ function vDDetails(){
   const d = S.draft;
   const t = S.trucks, r = S.trailers;
   return `
-  <button class="back" onclick="nav('d-request')">${ic('chevL',15)} Back</button>
-  <h2 class="scr">${ic(d.icon,20)} ${esc(d.service_label)}</h2>
-  <p class="scrsub">Step 2 of 4 — the details providers need</p>
-  <label class="f">Truck</label>
+  <button class="back" onclick="nav('d-request')">${ic('chevL',15)} ${T('Back')}</button>
+  <h2 class="scr">${ic(d.icon,20)} ${esc(T(d.service_label))}</h2>
+  <p class="scrsub">${T('Step 2 of 4 — the details providers need')}</p>
+  <label class="f">${T('Truck')}</label>
   <div class="chips" id="rq-truck">
-    ${t.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">Unit ${esc(x.data.unit)} · ${esc(x.data.make)} ${esc(x.data.model)}</span>`).join('')}
-    <span class="chip ${t.length?'':'sel'}" data-id="" onclick="togOne(this)">No saved truck</span>
+    ${t.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${T('Unit')} ${esc(x.data.unit)} · ${esc(x.data.make)} ${esc(x.data.model)}</span>`).join('')}
+    <span class="chip ${t.length?'':'sel'}" data-id="" onclick="togOne(this)">${T('No saved truck')}</span>
   </div>
-  <label class="f">Trailer</label>
+  <label class="f">${T('Trailer')}</label>
   <div class="chips" id="rq-trailer">
     ${r.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${esc(x.data.type)} #${esc(x.data.num)}${x.data.hazmat?' ⚠':''}</span>`).join('')}
-    <span class="chip ${r.length?'':'sel'}" data-id="" onclick="togOne(this)">Bobtail / none</span>
+    <span class="chip ${r.length?'':'sel'}" data-id="" onclick="togOne(this)">${T('Bobtail / none')}</span>
   </div>
   ${subPicker(d)}
   ${d.service_key === 'tires' ? tirePicker(d) : ''}
-  <label class="f">Situation</label>
+  <label class="f">${T('Situation')}</label>
   <div class="chips" id="rq-situation">
-    ${['On highway shoulder','Truck stop / lot','On ramp','Blocking traffic'].map(x=>`<span class="chip ${d.situation.includes(x)?'sel':''}" onclick="tog(this)">${x}</span>`).join('')}
+    ${['On highway shoulder','Truck stop / lot','On ramp','Blocking traffic'].map(x=>`<span class="chip ${d.situation.includes(x)?'sel':''}" data-en="${x}" onclick="tog(this)">${T(x)}</span>`).join('')}
   </div>
-  <label class="f">Can the truck move under its own power?</label>
+  <label class="f">${T('Can the truck move under its own power?')}</label>
   <div class="chips" id="rq-move">
-    ${[['no',"Can't move"],['short','Short distance'],['yes','Yes']].map(([v,l])=>`<span class="chip ${d.can_move===v?'sel':''}" data-v="${v}" onclick="togOne(this)">${l}</span>`).join('')}
+    ${[['no',"Can't move"],['short','Short distance'],['yes','Yes']].map(([v,l])=>`<span class="chip ${d.can_move===v?'sel':''}" data-v="${v}" onclick="togOne(this)">${T(l)}</span>`).join('')}
   </div>
-  <label class="f">What happened?</label>
-  <textarea rows="3" id="rq-desc" placeholder="Describe the problem — dash codes, sounds, what you see…">${esc(d.description || '')}</textarea>
-  <label class="f">Photos (optional but providers respond faster with them)</label>
+  <label class="f">${T('What happened?')}</label>
+  <textarea rows="3" id="rq-desc" placeholder="${T('Describe the problem — dash codes, sounds, what you see…')}">${esc(d.description || '')}</textarea>
+  <label class="f">${T('Photos (optional but providers respond faster with them)')}</label>
   <div class="chips" id="rq-photos">
-    ${d.photos.map(p=>`<span class="chip">${ic('camera',13)} added</span>`).join('')}
-    <label class="chip dashed" style="cursor:pointer">+ Add photo<input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this)"></label>
+    ${d.photos.map(p=>`<span class="chip">${ic('camera',13)} ${T('added')}</span>`).join('')}
+    <label class="chip dashed" style="cursor:pointer">${T('+ Add photo')}<input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this)"></label>
   </div>
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveDetails()">Continue ${ic('arrowR',15)}</button>`;
+  <button class="btn" onclick="saveDetails()">${T('Continue')} ${ic('arrowR',15)}</button>`;
 }
 /* ---- optional refinement: which kind of work, from the admin catalog ---- */
 function subPicker(d){
   const items = (catByKey(d.service_key)?.items) || [];
   if (!items.length) return '';
   return `
-  <label class="f">What kind? <span style="text-transform:none; letter-spacing:0; font-weight:500">(optional — helps them bring the right parts)</span></label>
+  <label class="f">${T('What kind?')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('(optional — helps them bring the right parts)')}</span></label>
   <div class="chips" id="rq-subitem">
-    ${items.map(i=>`<span class="chip ${i.label===d.service_item?'sel':''}" onclick="togOne(this)">${esc(i.label)}</span>`).join('')}
+    ${items.map(i=>`<span class="chip ${i.label===d.service_item?'sel':''}" data-en="${esc(i.label)}" onclick="togOne(this)">${esc(T(i.label))}</span>`).join('')}
   </div>`;
 }
 
@@ -527,24 +546,24 @@ function tirePicker(d){
   const tp = d.tire_position || {};
   const isSteer = /steer/i.test(tp.axle || '');
   return `
-  <label class="f">Which tire?</label>
+  <label class="f">${T('Which tire?')}</label>
   <div class="chips" id="rq-tire-axle">
-    ${TIRE_AXLES.map(a=>`<span class="chip ${a===tp.axle?'sel':''}" onclick="pickAxle(this)">${a}</span>`).join('')}
+    ${TIRE_AXLES.map(a=>`<span class="chip ${a===tp.axle?'sel':''}" data-en="${a}" onclick="pickAxle(this)">${T(a)}</span>`).join('')}
   </div>
-  <label class="f">Which side?</label>
+  <label class="f">${T('Which side?')}</label>
   <div class="chips" id="rq-tire-side">
-    ${['Driver side','Passenger side'].map(x=>`<span class="chip ${x===tp.side?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+    ${['Driver side','Passenger side'].map(x=>`<span class="chip ${x===tp.side?'sel':''}" data-en="${x}" onclick="togOne(this)">${T(x)}</span>`).join('')}
   </div>
   ${isSteer ? '' : `
-  <label class="f">Inside or outside?</label>
+  <label class="f">${T('Inside or outside?')}</label>
   <div class="chips" id="rq-tire-pos">
-    ${['Outside','Inside','Super single (only one tire)'].map(x=>`<span class="chip ${x===tp.position?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+    ${['Outside','Inside','Super single (only one tire)'].map(x=>`<span class="chip ${x===tp.position?'sel':''}" data-en="${x}" onclick="togOne(this)">${T(x)}</span>`).join('')}
   </div>`}
-  <label class="f">What happened to it?</label>
+  <label class="f">${T('What happened to it?')}</label>
   <div class="chips" id="rq-tire-problem">
-    ${['Flat','Blowout','Low air','Sidewall damage','Tread separation','Wheel damage','Not sure'].map(x=>`<span class="chip ${x===tp.problem?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+    ${['Flat','Blowout','Low air','Sidewall damage','Tread separation','Wheel damage','Not sure'].map(x=>`<span class="chip ${x===tp.problem?'sel':''}" data-en="${x}" onclick="togOne(this)">${T(x)}</span>`).join('')}
   </div>
-  <div class="faint" style="margin-top:8px">${ic('check',12)} The tire size comes from your saved rig automatically, so they bring the right one.</div>`;
+  <div class="faint" style="margin-top:8px">${ic('check',12)} ${T('The tire size comes from your saved rig automatically, so they bring the right one.')}</div>`;
 }
 function pickAxle(el){
   togOne(el);
@@ -553,13 +572,14 @@ function pickAxle(el){
 }
 function readTirePicker(){
   if (!$('rq-tire-axle')) return S.draft.tire_position || null;
-  const axle = $('rq-tire-axle').querySelector('.chip.sel')?.textContent.trim() || '';
+  const selChip = id => { const c = $(id)?.querySelector('.chip.sel'); return c ? chipVal(c) : ''; };
+  const axle = selChip('rq-tire-axle');
   if (!axle) return null;
   return {
     axle,
-    side: $('rq-tire-side')?.querySelector('.chip.sel')?.textContent.trim() || '',
-    position: /steer/i.test(axle) ? 'Single' : ($('rq-tire-pos')?.querySelector('.chip.sel')?.textContent.trim() || ''),
-    problem: $('rq-tire-problem')?.querySelector('.chip.sel')?.textContent.trim() || ''
+    side: selChip('rq-tire-side'),
+    position: /steer/i.test(axle) ? 'Single' : selChip('rq-tire-pos'),
+    problem: selChip('rq-tire-problem')
   };
 }
 async function uploadPhoto(input){
@@ -567,7 +587,7 @@ async function uploadPhoto(input){
   const fd = new FormData(); fd.append('file', input.files[0]);
   const res = await fetch('/api/upload', { method: 'POST', body: fd });
   const data = await res.json();
-  if (data.url){ S.draft.photos.push(data.url); toast('Photo added'); render(); }
+  if (data.url){ S.draft.photos.push(data.url); toast(T('Photo added')); render(); }
 }
 function saveDetails(){
   const d = S.draft;
@@ -577,10 +597,10 @@ function saveDetails(){
   d.situation = selOf('rq-situation');
   d.can_move = $('rq-move').querySelector('.chip.sel')?.dataset.v || 'no';
   d.description = qv('rq-desc');
-  d.service_item = $('rq-subitem')?.querySelector('.chip.sel')?.textContent.trim() || '';
+  { const c = $('rq-subitem')?.querySelector('.chip.sel'); d.service_item = c ? chipVal(c) : ''; }
   if (d.service_key === 'tires') {
     const tp = readTirePicker();
-    if (!tp || !tp.axle) return toast('Pick which tire so they bring the right one');
+    if (!tp || !tp.axle) return toast(T('Pick which tire so they bring the right one'));
     d.tire_position = tp;
   }
   nav('d-location');
@@ -588,35 +608,35 @@ function saveDetails(){
 function vDLocation(){
   const d = S.draft;
   return `
-  <button class="back" onclick="nav('d-details')">${ic('chevL',15)} Back</button>
-  <h2 class="scr">Where are you?</h2>
-  <p class="scrsub">Step 3 of 4 — this is how they find you</p>
+  <button class="back" onclick="nav('d-details')">${ic('chevL',15)} ${T('Back')}</button>
+  <h2 class="scr">${T('Where are you?')}</h2>
+  <p class="scrsub">${T('Step 3 of 4 — this is how they find you')}</p>
   ${d.lat ? `
   <div class="card">
-    <div class="row"><span class="sec">${ic('check',14)} Location locked</span>
-      <a class="faint" onclick="captureGPS()">re-capture</a></div>
+    <div class="row"><span class="sec">${ic('check',14)} ${T('Location locked')}</span>
+      <a class="faint" onclick="captureGPS()">${T('re-capture')}</a></div>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Companies will see</span> &nbsp;<b class="k">${esc(d.area_label || 'locating…')}</b><br>
-      <span class="muted">Exact GPS</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">(only shown after they buy)</span>
+      <span class="muted">${T('Companies will see')}</span> &nbsp;<b class="k">${esc(d.area_label || T('locating…'))}</b><br>
+      <span class="muted">${T('Exact GPS')}</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">${T('(only shown after they buy)')}</span>
     </div>
   </div>` : `
   <div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">Tap below to share your location.</b> Your exact spot stays hidden until a company pays for the lead — they only see the general area first.</div>
+    <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">${T('Tap below to share your location.')}</b> ${T('Your exact spot stays hidden until a company pays for the lead — they only see the general area first.')}</div>
     <div style="height:12px"></div>
-    <button class="btn" onclick="captureGPS()">${ic('pin',16)} Use my GPS location</button>
+    <button class="btn" onclick="captureGPS()">${ic('pin',16)} ${T('Use my GPS location')}</button>
   </div>`}
-  <label class="f">Which way were you headed?</label>
+  <label class="f">${T('Which way were you headed?')}</label>
   <div class="chips" id="rq-direction">
-    ${['Northbound','Southbound','Eastbound','Westbound','Not on a highway'].map(x=>`<span class="chip ${d.direction===x?'sel':''}" onclick="togOne(this)">${x}</span>`).join('')}
+    ${['Northbound','Southbound','Eastbound','Westbound','Not on a highway'].map(x=>`<span class="chip ${d.direction===x?'sel':''}" data-en="${x}" onclick="togOne(this)">${T(x)}</span>`).join('')}
   </div>
-  <div class="faint" style="margin-top:6px">On a divided highway this is the difference between a 5-minute and a 30-minute response. Companies see it up front so they never have to ask.</div>
+  <div class="faint" style="margin-top:6px">${T('On a divided highway this is the difference between a 5-minute and a 30-minute response. Companies see it up front so they never have to ask.')}</div>
   <div style="height:4px"></div>
-  <label class="f">Landmark or mile marker (optional, helps a lot)</label>
-  <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="I-5 NB shoulder, mile marker 253, past the Buttonwillow exit">
-  <div class="faint" style="margin-top:6px">Only companies that buy your lead see this.</div>
+  <label class="f">${T('Landmark or mile marker (optional, helps a lot)')}</label>
+  <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="${T('I-5 NB shoulder, mile marker 253, past the Buttonwillow exit')}">
+  <div class="faint" style="margin-top:6px">${T('Only companies that buy your lead see this.')}</div>
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveLocation()" ${d.lat ? '' : 'disabled'}>Continue ${ic('arrowR',15)}</button>
-  ${d.lat ? '' : '<div class="faint" style="text-align:center; margin-top:9px">Share your location to continue — or <a onclick="manualLocation()">enter it by hand</a></div>'}`;
+  <button class="btn" onclick="saveLocation()" ${d.lat ? '' : 'disabled'}>${T('Continue')} ${ic('arrowR',15)}</button>
+  ${d.lat ? '' : `<div class="faint" style="text-align:center; margin-top:9px">${T('Share your location to continue — or')} <a onclick="manualLocation()">${T('enter it by hand')}</a></div>`}`;
 }
 async function lookupArea(){
   const d = S.draft;
@@ -627,28 +647,28 @@ async function lookupArea(){
   render();
 }
 function captureGPS(){
-  if (!navigator.geolocation) return toast('No GPS on this device — enter it by hand');
-  toast('Locating…');
+  if (!navigator.geolocation) return toast(T('No GPS on this device — enter it by hand'));
+  toast(T('Locating…'));
   navigator.geolocation.getCurrentPosition(
     pos => {
       S.draft.lat = pos.coords.latitude; S.draft.lng = pos.coords.longitude;
-      toast('Location locked'); lookupArea();
+      toast(T('Location locked')); lookupArea();
     },
-    () => toast('GPS unavailable — enter it by hand instead'),
+    () => toast(T('GPS unavailable — enter it by hand instead')),
     { enableHighAccuracy: true, timeout: 10000 });
 }
 function manualLocation(){
-  const txt = prompt('Type the nearest town and state (example: Buttonwillow, CA)');
+  const txt = prompt(T('Type the nearest town and state (example: Buttonwillow, CA)'));
   if (!txt) return;
   S.draft.lat = 35.4021; S.draft.lng = -119.4718;   // approximate; landmark carries the detail
   S.draft.area_label = txt.trim();
   S.draft.landmark = (S.draft.landmark || '') + (S.draft.landmark ? ' · ' : '') + txt.trim();
-  toast('Saved — add a mile marker below so they can find you');
+  toast(T('Saved — add a mile marker below so they can find you'));
   render();
 }
 function saveLocation(){
   const d = S.draft;
-  if (!d.lat) return toast('Share your location first');
+  if (!d.lat) return toast(T('Share your location first'));
   d.landmark = qv('rq-landmark');
   d.direction = selOf('rq-direction')[0] || '';
   nav('d-review');
@@ -658,38 +678,38 @@ function vDReview(){
   const t = S.trucks.find(x=>x.id===d.truck_id)?.data || {};
   const r = S.trailers.find(x=>x.id===d.trailer_id)?.data || {};
   return `
-  <button class="back" onclick="nav('d-location')">${ic('chevL',15)} Back</button>
-  <h2 class="scr">Ready to send?</h2>
-  <p class="scrsub">Step 4 of 4 — providers near you get alerted instantly</p>
+  <button class="back" onclick="nav('d-location')">${ic('chevL',15)} ${T('Back')}</button>
+  <h2 class="scr">${T('Ready to send?')}</h2>
+  <p class="scrsub">${T('Step 4 of 4 — providers near you get alerted instantly')}</p>
   <div class="card">
-    <div class="row"><b class="k" style="display:inline-flex;align-items:center;gap:7px">${ic(d.icon)} ${esc(d.service_label)}</b>
-      <span class="pill solid">${d.can_move==='no' ? "CAN'T MOVE" : 'CAN MOVE'}</span></div>
+    <div class="row"><b class="k" style="display:inline-flex;align-items:center;gap:7px">${ic(d.icon)} ${esc(T(d.service_label))}</b>
+      <span class="pill solid">${T(d.can_move==='no' ? "CAN'T MOVE" : 'CAN MOVE')}</span></div>
     <div class="divider"></div>
     <div class="mini listline">
-      <span class="muted">Truck</span> &nbsp;${t.make ? esc(`Unit ${t.unit} · ${t.year} ${t.make} ${t.model} · ${t.engine}`) : 'Not specified'}<br>
-      <span class="muted">Trailer</span> &nbsp;${r.type ? esc(r.type) + (r.hazmat ? ` · <span style="color:var(--red);font-weight:700">Hazmat UN ${esc(r.un)}</span>` : '') : 'Bobtail / none'}<br>
-      ${d.service_item ? `<span class="muted">Type</span> &nbsp;<b class="k">${esc(d.service_item)}</b><br>` : ''}
-      ${d.tire_position ? `<span class="muted">Tire</span> &nbsp;<b class="k">${esc([d.tire_position.axle, d.tire_position.side, d.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${d.tire_position.problem ? ' — '+esc(d.tire_position.problem) : ''}<br>` : ''}
-      <span class="muted">Where</span> &nbsp;${esc(d.area_label)}<br>
-      <span class="muted">Photos</span> &nbsp;${d.photos.length || 'none'}
+      <span class="muted">${T('Truck')}</span> &nbsp;${t.make ? esc(`${T('Unit')} ${t.unit} · ${t.year} ${t.make} ${t.model} · ${t.engine}`) : T('Not specified')}<br>
+      <span class="muted">${T('Trailer')}</span> &nbsp;${r.type ? esc(r.type) + (r.hazmat ? ` · <span style="color:var(--red);font-weight:700">Hazmat UN ${esc(r.un)}</span>` : '') : T('Bobtail / none')}<br>
+      ${d.service_item ? `<span class="muted">${T('Type')}</span> &nbsp;<b class="k">${esc(T(d.service_item))}</b><br>` : ''}
+      ${d.tire_position ? `<span class="muted">${T('Tire')}</span> &nbsp;<b class="k">${esc([d.tire_position.axle, d.tire_position.side, d.tire_position.position].filter(x=>x && x!=='Single').map(x=>T(x)).join(' · '))}</b>${d.tire_position.problem ? ' — '+esc(T(d.tire_position.problem)) : ''}<br>` : ''}
+      <span class="muted">${T('Where')}</span> &nbsp;${esc(d.area_label)}<br>
+      <span class="muted">${T('Photos')}</span> &nbsp;${d.photos.length || T('none')}
     </div>
   </div>
   <div class="card">
-    <span class="sec">Who should get this request?</span>
+    <span class="sec">${T('Who should get this request?')}</span>
     <div class="chips" id="rq-licensed" style="margin-top:9px">
-      <span class="chip ${d.licensed_only ? '' : 'sel'}" data-v="0" onclick="togOne(this); previewMatches()">All approved companies</span>
-      <span class="chip ${d.licensed_only ? 'sel' : ''}" data-v="1" onclick="togOne(this); previewMatches()">${ic('check',13)} Licensed companies only</span>
+      <span class="chip ${d.licensed_only ? '' : 'sel'}" data-v="0" onclick="togOne(this); previewMatches()">${T('All approved companies')}</span>
+      <span class="chip ${d.licensed_only ? 'sel' : ''}" data-v="1" onclick="togOne(this); previewMatches()">${ic('check',13)} ${T('Licensed companies only')}</span>
     </div>
-    <label class="f">Only companies whose main work is… <span style="text-transform:none; letter-spacing:0; font-weight:500">(optional)</span></label>
+    <label class="f">${T('Only companies whose main work is…')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('(optional)')}</span></label>
     <div class="chips" id="rq-trades">
-      ${(S.trades||[]).map(t=>`<span class="chip ${(d.trade_filter||[]).includes(t.key)?'sel':''}" data-key="${t.key}" onclick="tog(this); previewMatches()">${esc(t.label)}</span>`).join('')}
+      ${(S.trades||[]).map(t=>`<span class="chip ${(d.trade_filter||[]).includes(t.key)?'sel':''}" data-key="${t.key}" onclick="tog(this); previewMatches()">${esc(T(t.label))}</span>`).join('')}
     </div>
-    <div class="faint" style="margin-top:10px; line-height:1.5" id="matchPreview">Checking how many companies match…</div>
+    <div class="faint" style="margin-top:10px; line-height:1.5" id="matchPreview">${T('Checking how many companies match…')}</div>
   </div>
   <div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('bell',14)} Qualified providers near you will be texted the moment you send. Up to <b class="k">4</b> can respond — you pick the winner. <b class="k">Free for you.</b></div>
+    <div class="mini" style="line-height:1.55">${ic('bell',14)} ${T('Qualified providers near you will be texted the moment you send. Up to')} <b class="k">4</b> ${T('can respond — you pick the winner.')} <b class="k">${T('Free for you.')}</b></div>
   </div>
-  <button class="btn big" onclick="sendRequest(this)">${ic('send',17)} SEND REQUEST</button>`;
+  <button class="btn big" onclick="sendRequest(this)">${ic('send',17)} ${T('SEND REQUEST')}</button>`;
 }
 function readFilters(){
   const d = S.draft;
@@ -709,8 +729,8 @@ async function previewMatches(){
     const p = await api('GET', '/requests/preview?' + qs);
     const narrowed = d.licensed_only || d.trade_filter.length;
     el.innerHTML = p.matches === 0
-      ? `<span style="color:var(--red)">${ic('warn',12)} <b>No companies match these filters.</b> ${p.without_filters} would be alerted without them — loosen the choices above, or send anyway and you can widen it after.</span>`
-      : `${ic('check',12)} <b>${p.matches} compan${p.matches===1?'y':'ies'}</b> will be alerted${narrowed && p.without_filters > p.matches ? ` (${p.without_filters} without your filters)` : ''}.`;
+      ? `<span style="color:var(--red)">${ic('warn',12)} <b>${T('No companies match these filters.')}</b> ${T('{n} would be alerted without them — loosen the choices above, or send anyway and you can widen it after.', { n: p.without_filters })}</span>`
+      : `${ic('check',12)} <b>${TN(p.matches, '{n} company will be alerted', '{n} companies will be alerted')}</b>${narrowed && p.without_filters > p.matches ? ` ${T('({n} without your filters)', { n: p.without_filters })}` : ''}.`;
   } catch(e){ el.textContent = ''; }
 }
 async function sendRequest(btn){
@@ -719,8 +739,8 @@ async function sendRequest(btn){
   try {
     const res = await api('POST', '/requests', d);
     toast(res.notified === 0
-      ? (d.licensed_only ? 'No licensed companies nearby — see options below' : 'No providers cover this area yet')
-      : `${res.notified} provider${res.notified===1?'':'s'} notified${res.expanded ? ' (search radius expanded)' : ''}`);
+      ? T(d.licensed_only ? 'No licensed companies nearby — see options below' : 'No providers cover this area yet')
+      : TN(res.notified, '{n} provider notified', '{n} providers notified') + (res.expanded ? T(' (search radius expanded)') : ''));
     nav('d-active', { activeRequestId: res.request.id });
   } catch(e){ btn.disabled = false; }
 }
@@ -732,7 +752,7 @@ function onTheWayCard(w){
   if (w.completed) return '';
   if (w.arrived) return `
     <div class="card" style="border-color:var(--red); background:var(--red-tint)">
-      <div class="row"><b class="mini k" style="font-size:15px">${ic('check',16)} ${esc(w.tech_name || w.company)} is on scene</b></div>
+      <div class="row"><b class="mini k" style="font-size:15px">${ic('check',16)} ${esc(w.tech_name || w.company)} ${T('is on scene')}</b></div>
       <div class="mini" style="margin-top:5px; color:#8c5057">${esc(w.company)}${w.tech_phone ? ' · ' + esc(w.tech_phone) : ''}</div>
     </div>`;
   const setAt = new Date(w.eta_set_at).getTime();
@@ -743,13 +763,13 @@ function onTheWayCard(w){
   <div class="card" style="border-color:var(--red)">
     <div class="row">
       <div>
-        <b class="mini k" style="font-size:15px">${ic('truck',16)} ${esc(w.tech_name || w.company)} is on the way</b>
+        <b class="mini k" style="font-size:15px">${ic('truck',16)} ${esc(w.tech_name || w.company)} ${T('is on the way')}</b>
         <div class="faint" style="margin-top:4px">${esc(w.company)}${w.tech_phone ? ` · <a href="tel:${esc(w.tech_phone)}" style="color:var(--red); font-weight:700">${esc(w.tech_phone)}</a>` : ''}</div>
       </div>
       <div style="text-align:right">
         <div id="etaNum" style="font-size:30px; font-weight:800; letter-spacing:-1px; line-height:1; color:${overdue ? 'var(--red)' : 'var(--ink)'}">
           ${overdue ? Math.abs(left) : Math.max(0, left)}</div>
-        <div class="faint" style="font-size:11px">${overdue ? 'min overdue' : 'min away'}</div>
+        <div class="faint" style="font-size:11px">${T(overdue ? 'min overdue' : 'min away')}</div>
       </div>
     </div>
   </div>`;
@@ -768,54 +788,55 @@ async function vDActive(){
   const r = d.request;
   const filled = d.responders.length;
   return `
-  <button class="back" onclick="nav('d-home')">${ic('chevL',15)} Home</button>
-  <h2 class="scr">${r.status==='open' ? 'Help is on the way' : 'Request #'+r.id}</h2>
-  <p class="scrsub">Request #${r.id} · ${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} compan${r.notified_count===1?'y':'ies'} alerted</p>
+  <button class="back" onclick="nav('d-home')">${ic('chevL',15)} ${T('Home')}</button>
+  <h2 class="scr">${r.status==='open' ? T('Help is on the way') : T('Request #')+r.id}</h2>
+  <p class="scrsub">${T('Request #')}${r.id} · ${esc(T(r.service_label))} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')}</p>
   ${onTheWayCard(d.on_the_way)}
   <div class="card">
-    <div class="row"><span class="sec">Response Slots</span><span class="pill red">${filled ? filled + ' of 4 responded' : 'notifying…'}</span></div>
+    <div class="row"><span class="sec">${T('Response Slots')}</span><span class="pill red">${filled ? T('{n} of 4 responded', { n: filled }) : T('notifying…')}</span></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
-    <div class="faint" style="margin-top:7px">3 standard slots + 1 premium slot · you choose the winner</div>
+    <div class="faint" style="margin-top:7px">${T('3 standard slots + 1 premium slot · you choose the winner')}</div>
   </div>
   ${(r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0 && r.status === 'open' ? `
     <div class="card alert">
-      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Nobody matched your filters.</b>
-      You narrowed this request, and no company nearby fits — so nobody was alerted.</div>
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">${T('Nobody matched your filters.')}</b>
+      ${T('You narrowed this request, and no company nearby fits — so nobody was alerted.')}</div>
       <div style="height:10px"></div>
-      <button class="btn" onclick="openToAll(${r.id})">Send to all approved companies instead</button>
+      <button class="btn" onclick="openToAll(${r.id})">${T('Send to all approved companies instead')}</button>
     </div>` : ''}
   ${r.notified_count === 0 && r.status === 'open' && !(r.licensed_only || (r.trade_filter||[]).length) && (r.duty_class && r.duty_class !== 'heavy') ? `
     <div class="card alert">
-      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">No ${r.duty_class === 'medium' ? 'medium' : 'light'}-duty companies cover this area yet.</b>
-      The shops nearby have told us they only work on heavy trucks. Your request stays open in case one widens their coverage — call around in the meantime.</div>
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">${T(r.duty_class === 'medium' ? 'No medium-duty companies cover this area yet.' : 'No light-duty companies cover this area yet.')}</b>
+      ${T('The shops nearby have told us they only work on heavy trucks. Your request stays open in case one widens their coverage — call around in the meantime.')}</div>
     </div>` : ''}
-  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) && !(r.notified_count === 0 && r.duty_class && r.duty_class !== 'heavy') ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} Waiting for providers to respond… you'll get a text the second one does.</span></div>` : ''}
+  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) && !(r.notified_count === 0 && r.duty_class && r.duty_class !== 'heavy') ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} ${T("Waiting for providers to respond… you'll get a text the second one does.")}</span></div>` : ''}
   ${filled > 0 && r.status === 'open' ? `<div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">Message them before you choose.</b> Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.</div>
+    <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">${T('Message them before you choose.')}</b> ${T("Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.")}</div>
   </div>` : ''}
   ${d.responders.map(x=>`
     <div class="resp">
       <div class="row"><div>
         <span class="nm" style="cursor:pointer" onclick="nav('d-pubprofile',{viewProviderId:${x.provider_id}})">${esc(x.name)} <span style="color:var(--faint)">›</span></span>
-        <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? 'New'} · ${x.jobs_won} jobs${x.premium ? ' · premium responder' : ''}</span>
+        <div>${star5(Math.round(x.rating || 0))} <span class="faint">${x.rating ?? T('New')} · ${x.jobs_won} ${T('jobs')}${x.premium ? T(' · premium responder') : ''}</span>
         ${x.primary_trade ? ` <span class="pill red" style="font-size:9.5px">${esc(tradeLabel(x.primary_trade).toUpperCase())}</span>` : ''}
-        ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} LICENSED</span>` : ''}</div>
-      </div>${r.selected_provider===x.provider_id ? '<span class="pill solid">CHOSEN</span>' : ''}</div>
-      ${x.quote ? `<div class="quote"><span>Quoted: ${esc(x.quote.note || '')} ${x.quote.eta ? '· ETA '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>No quote yet — chat with them</span><b style="color:var(--muted)">…</b></div>`}
+        ${x.license_verified ? ` <span class="pill dark" style="font-size:9.5px">${ic('check',10)} ${T('LICENSED')}</span>` : ''}
+        ${x.spanish_dispatch ? ` <span class="pill dark" style="font-size:9.5px; background:#1a7f43">${T('Hablamos español')}</span>` : ''}</div>
+      </div>${r.selected_provider===x.provider_id ? `<span class="pill solid">${T('CHOSEN')}</span>` : ''}</div>
+      ${x.quote ? `<div class="quote"><span>${T('Quoted:')} ${esc(x.quote.note || '')} ${x.quote.eta ? '· '+T('ETA')+' '+esc(fmtEta(x.quote.eta)) : ''}</span><b class="k">${fmt$(x.quote.amount_cents)}</b></div>` : `<div class="quote"><span>${T('No quote yet — chat with them')}</span><b style="color:var(--muted)">…</b></div>`}
       <div class="actions">
-        <button class="btn chat" onclick="openThread(${r.id},${x.provider_id},'d-active')">${ic('chat',15)} Chat first</button>
-        ${r.status==='open' ? `<button class="btn choose" onclick="askChoose(${r.id},${x.provider_id},'${esc(x.name).replace(/'/g,"")}')">${ic('check',15)} Choose</button>` : ''}
+        <button class="btn chat" onclick="openThread(${r.id},${x.provider_id},'d-active')">${ic('chat',15)} ${T('Chat first')}</button>
+        ${r.status==='open' ? `<button class="btn choose" onclick="askChoose(${r.id},${x.provider_id},'${esc(x.name).replace(/'/g,"")}')">${ic('check',15)} ${T('Choose')}</button>` : ''}
       </div>
     </div>`).join('')}
   ${r.status==='selected' ? `
-    <button class="btn dark" onclick="completeRequest(${r.id})">${ic('check',16)} Mark job complete</button>` : ''}
+    <button class="btn dark" onclick="completeRequest(${r.id})">${ic('check',16)} ${T('Mark job complete')}</button>` : ''}
   ${r.status==='completed' ? `
-    <div class="card click" onclick="nav('d-rate',{rateRequestId:${r.id}})"><div class="row"><span class="mini k">${ic('star',14)} &nbsp;Rate this provider</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
-  ${r.status==='open' ? `<button class="btn ghost" onclick="cancelRequest(${r.id})">Cancel request</button>` : ''}`;
+    <div class="card click" onclick="nav('d-rate',{rateRequestId:${r.id}})"><div class="row"><span class="mini k">${ic('star',14)} &nbsp;${T('Rate this provider')}</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
+  ${r.status==='open' ? `<button class="btn ghost" onclick="cancelRequest(${r.id})">${T('Cancel request')}</button>` : ''}`;
 }
 async function openToAll(reqId){
   const res = await api('POST', `/requests/${reqId}/open-to-all`);
-  toast(`${res.notified} more compan${res.notified===1?'y':'ies'} notified`);
+  toast(TN(res.notified, '{n} more company notified', '{n} more companies notified'));
   render();
 }
 function askChoose(reqId, provId, name){
@@ -824,14 +845,14 @@ function askChoose(reqId, provId, name){
   el.id = 'confirmWrap';
   el.innerHTML = `
     <div class="modal">
-      <h3>Choose this company?</h3>
-      <p>They get your exact location and mile marker, and they're on their way.</p>
+      <h3>${T('Choose this company?')}</h3>
+      <p>${T("They get your exact location and mile marker, and they're on their way.")}</p>
       <div class="who"><b class="k">${esc(name)}</b></div>
-      <p>${ic('warn',13)} This can't be undone. The other companies will be told they didn't get the job, and your request closes to new responders.</p>
-      <p>If you haven't asked for an ETA and price yet, chat with them first.</p>
+      <p>${ic('warn',13)} ${T("This can't be undone. The other companies will be told they didn't get the job, and your request closes to new responders.")}</p>
+      <p>${T("If you haven't asked for an ETA and price yet, chat with them first.")}</p>
       <div class="acts">
-        <button class="btn ghost" onclick="closeConfirm()">Not yet</button>
-        <button class="btn" onclick="confirmChoose(${reqId},${provId})">Yes, choose them</button>
+        <button class="btn ghost" onclick="closeConfirm()">${T('Not yet')}</button>
+        <button class="btn" onclick="confirmChoose(${reqId},${provId})">${T('Yes, choose them')}</button>
       </div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
@@ -841,38 +862,39 @@ function closeConfirm(){ $('confirmWrap')?.remove(); }
 async function confirmChoose(reqId, provId){
   closeConfirm();
   await api('POST', `/requests/${reqId}/select`, { provider_id: provId });
-  toast('Chosen — they have your location now, the others were told');
+  toast(T('Chosen — they have your location now, the others were told'));
   render();
 }
 async function completeRequest(reqId){
   await api('POST', `/requests/${reqId}/complete`);
-  toast('Job marked complete'); render();
+  toast(T('Job marked complete')); render();
 }
 async function cancelRequest(reqId){
   await api('POST', `/requests/${reqId}/cancel`);
-  toast('Request cancelled'); nav('d-home');
+  toast(T('Request cancelled')); nav('d-home');
 }
 async function vDPubProfile(){
   const p = await api('GET', `/providers/${S.viewProviderId}/public`);
   const total = Math.max(1, p.rating_count);
   const bd = n => (p.breakdown.find(b=>b.stars===n)?.n) || 0;
   return `
-  <button class="back" onclick="history.length ? nav('d-active') : nav('d-home')">${ic('chevL',15)} Back</button>
+  <button class="back" onclick="history.length ? nav('d-active') : nav('d-home')">${ic('chevL',15)} ${T('Back')}</button>
   <div class="cols2" style="margin-top:8px"><div>
   <div class="card" style="text-align:center; padding:22px">
     <b class="k" style="font-size:17px">${esc(p.name)}</b>
     <div style="margin-top:4px">${star5(Math.round(p.rating||0))} <b class="k" style="font-size:15px">${p.rating ?? ''}</b>
-      <span class="faint">· ${p.rating_count ? p.rating_count + ' reviews' : 'New to RIGRX'} · ${p.jobs_won} jobs</span></div>
-    ${p.primary_trade ? `<div class="muted" style="margin-top:6px">${esc(tradeLabel(p.primary_trade))}</div>` : ''}
+      <span class="faint">· ${p.rating_count ? p.rating_count + ' ' + T('reviews') : T('New to RIGRX')} · ${p.jobs_won} ${T('jobs')}</span></div>
+    ${p.primary_trade ? `<div class="muted" style="margin-top:6px">${esc(T(tradeLabel(p.primary_trade)))}</div>` : ''}
     <div class="chips" style="justify-content:center; margin-top:12px">
-      ${p.license_verified ? `<span class="pill dark">${ic('check',11)} License verified</span>` : '<span class="pill gray">License not verified</span>'}
-      ${(p.badges||[]).map(b=>`<span class="pill dark">${esc(b)}</span>`).join('')}
-      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill gray">${esc(label)}</span>`).join('')}
+      ${p.license_verified ? `<span class="pill dark">${ic('check',11)} ${T('License verified')}</span>` : `<span class="pill gray">${T('License not verified')}</span>`}
+      ${p.spanish_dispatch ? `<span class="pill dark" style="background:#1a7f43">${T('Hablamos español')}</span>` : ''}
+      ${(p.badges||[]).map(b=>`<span class="pill dark">${esc(T(b))}</span>`).join('')}
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill gray">${esc(T(label))}</span>`).join('')}
       <span class="pill gray">${esc(p.hours)}</span>
     </div>
   </div>
   <div class="card">
-    <span class="sec">Rating breakdown</span>
+    <span class="sec">${T('Rating breakdown')}</span>
     <div style="margin-top:10px">
       ${[5,4,3,2,1].map(n=>`
       <div class="row" style="margin-bottom:6px; gap:10px">
@@ -883,81 +905,81 @@ async function vDPubProfile(){
     </div>
   </div>
   <div class="card">
-    <span class="sec">Coverage</span>
+    <span class="sec">${T('Coverage')}</span>
     <div class="mini" style="margin-top:7px; line-height:1.8">${p.locations.map(l=>esc(l.label)+' ('+l.radius_mi+' mi)').join('<br>') || '—'}</div>
   </div>
   </div><div>
   <div class="card">
-    <span class="sec">Recent reviews</span>
-    ${p.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">${timeAgo(rv.created_at)} · ${esc(rv.service_label)}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('') || '<div class="faint" style="margin-top:8px">No reviews yet — new to RIGRX</div>'}
+    <span class="sec">${T('Recent reviews')}</span>
+    ${p.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">${timeAgo(rv.created_at)} · ${esc(T(rv.service_label))}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No reviews yet — new to RIGRX')}</div>`}
   </div>
   </div></div>`;
 }
 function vDRate(){
   S.rateStars = S.rateStars || 5;
   return `
-  <button class="back" onclick="nav('d-home')">${ic('chevL',15)} Home</button>
-  <h2 class="scr">How was the service?</h2>
-  <p class="scrsub">Request #${S.rateRequestId}</p>
+  <button class="back" onclick="nav('d-home')">${ic('chevL',15)} ${T('Home')}</button>
+  <h2 class="scr">${T('How was the service?')}</h2>
+  <p class="scrsub">${T('Request #')}${S.rateRequestId}</p>
   <div class="card" style="text-align:center; padding:24px">
     <div class="stars" id="rateStars" style="gap:6px; justify-content:center">
       ${[1,2,3,4,5].map(n=>`<svg class="ic fill" width="34" height="34" viewBox="0 0 24 24" style="cursor:pointer; opacity:${n<=S.rateStars?1:.25}" onclick="S.rateStars=${n}; render()">${PATHS.star}</svg>`).join('')}
     </div>
-    <div class="muted" style="margin-top:8px">${['','Poor','Fair','Good','Very good','Excellent'][S.rateStars]}</div>
+    <div class="muted" style="margin-top:8px">${T(['','Poor','Fair','Good','Very good','Excellent'][S.rateStars])}</div>
   </div>
-  <label class="f">What stood out?</label>
+  <label class="f">${T('What stood out?')}</label>
   <div class="chips" id="rate-tags">
-    ${['Fast response','Fair price','Professional','Fixed right the first time','Good communication'].map(t=>`<span class="chip" onclick="tog(this)">${t}</span>`).join('')}
+    ${['Fast response','Fair price','Professional','Fixed right the first time','Good communication'].map(t=>`<span class="chip" data-en="${t}" onclick="tog(this)">${T(t)}</span>`).join('')}
   </div>
-  <label class="f">Comment (optional)</label>
-  <textarea rows="3" id="rate-comment" placeholder="How did it go?"></textarea>
+  <label class="f">${T('Comment (optional)')}</label>
+  <textarea rows="3" id="rate-comment" placeholder="${T('How did it go?')}"></textarea>
   <div style="height:16px"></div>
-  <button class="btn" onclick="submitReview()">Submit review</button>`;
+  <button class="btn" onclick="submitReview()">${T('Submit review')}</button>`;
 }
 async function submitReview(){
   await api('POST', '/reviews', { request_id: S.rateRequestId, stars: S.rateStars,
     tags: selOf('rate-tags'), comment: qv('rate-comment') });
-  toast('Thanks — your review is live on their profile');
+  toast(T('Thanks — your review is live on their profile'));
   nav('d-home');
 }
 // Removing a rig only affects the garage. Requests already sent keep their own
 // snapshot of the truck, so deleting one never rewrites past history.
 async function removeTruck(id, label){
-  if (!confirm(`Remove ${label || 'this truck'} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.`)) return;
+  if (!confirm(T('Remove {x} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.', { x: label || T('this truck') }))) return;
   await api('DELETE', '/trucks/' + id);
-  await loadMe(); toast('Truck removed'); render();
+  await loadMe(); toast(T('Truck removed')); render();
 }
 async function removeTrailer(id, label){
-  if (!confirm(`Remove ${label || 'this trailer'} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.`)) return;
+  if (!confirm(T('Remove {x} from your garage?\n\nRequests you have already sent keep their details — this only stops it appearing when you ask for help.', { x: label || T('this trailer') }))) return;
   await api('DELETE', '/trailers/' + id);
-  await loadMe(); toast('Trailer removed'); render();
+  await loadMe(); toast(T('Trailer removed')); render();
 }
 async function vDGarage(){
   return `
-  <h2 class="scr">My Garage</h2>
-  <p class="scrsub">Saved rigs make requests take 30 seconds</p>
+  <h2 class="scr">${T('My Garage')}</h2>
+  <p class="scrsub">${T('Saved rigs make requests take 30 seconds')}</p>
   <div class="cols2"><div>
   ${S.trucks.map(x=>`<div class="card">
-    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} ${esc(x.data.unit) ? 'Unit '+esc(x.data.unit)+' — ' : ''}${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)} ${dutyPill(x.data.duty)}</b>
+    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} ${esc(x.data.unit) ? T('Unit')+' '+esc(x.data.unit)+' — ' : ''}${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)} ${dutyPill(x.data.duty)}</b>
       <span style="display:inline-flex; gap:12px">
-        <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} Edit</span>
-        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTruck(${x.id}, "${esc((x.data.year||"") + " " + (x.data.make||"") + " " + (x.data.model||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} Delete</span>
+        <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} ${T('Edit')}</span>
+        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTruck(${x.id}, "${esc((x.data.year||"") + " " + (x.data.make||"") + " " + (x.data.model||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} ${T('Delete')}</span>
       </span></div>
-    <div class="faint" style="margin-top:7px; line-height:1.7">Engine: ${esc(x.data.engine)} · ${esc(x.data.trans)} · ${esc(x.data.axles)}<br>Tires: ${esc(x.data.steer)} / ${esc(x.data.drive)} · ${esc(x.data.wheels)}</div>
-  </div>`).join('') || '<div class="card"><a onclick="S.editTruck=null; nav(\'d-setup2\')">+ Add your truck</a></div>'}
+    <div class="faint" style="margin-top:7px; line-height:1.7">${T('Engine:')} ${esc(x.data.engine)} · ${esc(x.data.trans)} · ${esc(x.data.axles)}<br>${T('Tires:')} ${esc(x.data.steer)} / ${esc(x.data.drive)} · ${esc(x.data.wheels)}</div>
+  </div>`).join('') || `<div class="card"><a onclick="S.editTruck=null; nav('d-setup2')">${T('+ Add your truck')}</a></div>`}
   </div><div>
   ${S.trailers.map(x=>`<div class="card">
-    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('trailer')} Trailer ${esc(x.data.num)} — ${esc(x.data.type)}</b>
+    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('trailer')} ${T('Trailer')} ${esc(x.data.num)} — ${esc(x.data.type)}</b>
       <span style="display:inline-flex; gap:12px">
-        <span class="faint" style="cursor:pointer" onclick='S.editTrailer={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup3")'>${ic('edit',13)} Edit</span>
-        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTrailer(${x.id}, "${esc((x.data.type||"trailer") + " " + (x.data.num||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} Delete</span>
+        <span class="faint" style="cursor:pointer" onclick='S.editTrailer={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup3")'>${ic('edit',13)} ${T('Edit')}</span>
+        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTrailer(${x.id}, "${esc((x.data.type||"trailer") + " " + (x.data.num||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} ${T('Delete')}</span>
       </span></div>
-    <div class="faint" style="margin-top:7px; line-height:1.7">${esc(x.data.len)} · ${esc(x.data.axles)} · Tires: ${esc(x.data.tires)}<br>${x.data.hazmat ? 'Hazmat: Class '+esc(x.data.hzClass)+' · UN '+esc(x.data.un) : 'No hazmat'}</div>
-  </div>`).join('') || '<div class="card"><a onclick="S.editTrailer=null; nav(\'d-setup3\')">+ Add your trailer</a></div>'}
+    <div class="faint" style="margin-top:7px; line-height:1.7">${esc(x.data.len)} · ${esc(x.data.axles)} · ${T('Tires:')} ${esc(x.data.tires)}<br>${x.data.hazmat ? T('Hazmat: Class')+' '+esc(x.data.hzClass)+' · UN '+esc(x.data.un) : T('No hazmat')}</div>
+  </div>`).join('') || `<div class="card"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('+ Add your trailer')}</a></div>`}
   </div></div>
   <div class="row" style="gap:8px">
-    <button class="btn ghost" onclick="S.editTruck=null; nav('d-setup2')">+ Add truck</button>
-    <button class="btn ghost" onclick="S.editTrailer=null; nav('d-setup3')">+ Add trailer</button>
+    <button class="btn ghost" onclick="S.editTruck=null; nav('d-setup2')">${T('+ Add truck')}</button>
+    <button class="btn ghost" onclick="S.editTrailer=null; nav('d-setup3')">${T('+ Add trailer')}</button>
   </div>`;
 }
 
@@ -965,12 +987,12 @@ async function vDGarage(){
 async function vThreads(){
   const rows = await api('GET', '/messages/threads');
   return `
-  <h2 class="scr">Messages</h2>
-  <p class="scrsub">${rows.length ? 'One thread per request & company' : 'No conversations yet'}</p>
+  <h2 class="scr">${T('Messages')}</h2>
+  <p class="scrsub">${T(rows.length ? 'One thread per request & company' : 'No conversations yet')}</p>
   ${rows.map(t=>`<div class="card click" onclick="openThread(${t.request_id},${t.provider_id},null)">
-    <div class="row"><div><b class="mini k">${esc(t.other_name || 'Conversation')}</b>
-    <div class="faint">Request #${t.request_id} · ${esc(t.service_label)}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
-    <span class="pill ${t.status==='open'?'red':'gray'}">${esc(t.status)}</span></div></div>`).join('')}`;
+    <div class="row"><div><b class="mini k">${esc(t.other_name || T('Conversation'))}</b>
+    <div class="faint">${T('Request #')}${t.request_id} · ${esc(T(t.service_label))}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
+    <span class="pill ${t.status==='open'?'red':'gray'}">${esc(T(t.status))}</span></div></div>`).join('')}`;
 }
 function openThread(reqId, provId, from){
   S.chatKey = { r: reqId, p: provId };
@@ -997,7 +1019,7 @@ async function chatView(backView){
   const other = d.other_name || (isDriver ? 'Service company' : 'Driver');
   const safeName = esc(other).replace(/'/g, '');
   const back = S.chatBack || backView;
-  const backLabel = back === 'd-active' ? 'Responders' : back === 'p-jobs' ? 'Jobs' : 'Messages';
+  const backLabel = T(back === 'd-active' ? 'Responders' : back === 'p-jobs' ? 'Jobs' : 'Messages');
   // Everything the guard prompts need, stashed where the send handler can reach it.
   S.chatCtx = { r, p, open, isDriver, name: other, others: d.others || { responders: 0, quoted: 0 } };
   afterChatRender(wasTyping);
@@ -1006,26 +1028,26 @@ async function chatView(backView){
     <div class="chathead">
       <button class="cbtn" onclick="leaveChat('${back}')">${ic('chevL',16)} <span>${backLabel}</span></button>
       <div class="who"><b class="k">${esc(other)}</b>
-        <span class="faint">Request #${r} · ${esc(d.request.service_label)}</span></div>
-      ${chosen ? '<span class="pill solid">CHOSEN</span>'
-        : `<span class="pill ${open?'red':'dark'}">${esc(d.request.status.toUpperCase())}</span>`}
+        <span class="faint">${T('Request #')}${r} · ${esc(T(d.request.service_label))}</span></div>
+      ${chosen ? `<span class="pill solid">${T('CHOSEN')}</span>`
+        : `<span class="pill ${open?'red':'dark'}">${esc(T(d.request.status.toUpperCase()))}</span>`}
     </div>
     <div class="chatscroll" id="chatlog">
       ${isDriver && open ? `<div class="card alert">
-        <div class="mini" style="line-height:1.5">${ic('lock',13)} Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.</div>
+        <div class="mini" style="line-height:1.5">${ic('lock',13)} ${T('Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.')}</div>
       </div>` : ''}
       ${!isDriver && open ? `<div class="card alert">
         <div class="mini" style="line-height:1.5">${ic('lock',13)} <b class="k">Don't ask for the exact location here.</b> You get the pin, the mile marker and turn-by-turn directions the second this driver picks you. Asking for it early is against the rules and gets flagged for review.</div>
       </div>` : ''}
       ${d.messages.map(m=>`
         <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
-          ${m.quote ? `${ic('tag',14)} <b class="k">QUOTE — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
+          ${m.quote ? `${ic('tag',14)} <b class="k">${T('QUOTE')} — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · '+T('ETA')+' '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
           <span class="t">${timeAgo(m.created_at)}</span>
-        </div>`).join('') || '<div class="faint" style="text-align:center; padding:20px">Say hello — the other side is notified instantly</div>'}
+        </div>`).join('') || `<div class="faint" style="text-align:center; padding:20px">${T('Say hello — the other side is notified instantly')}</div>`}
     </div>
     ${isDriver && open ? `<div class="chatact">
-      <button class="btn ghost" onclick="leaveChat('d-active',{activeRequestId:${r}})">${ic('chevL',14)} Responders</button>
-      <button class="btn choose" onclick="askChoose(${r},${p},'${safeName}')">${ic('check',15)} Choose this company</button>
+      <button class="btn ghost" onclick="leaveChat('d-active',{activeRequestId:${r}})">${ic('chevL',14)} ${T('Responders')}</button>
+      <button class="btn choose" onclick="askChoose(${r},${p},'${safeName}')">${ic('check',15)} ${T('Choose this company')}</button>
     </div>` : ''}
     ${!isDriver ? `
     <div class="quotebar">
@@ -1034,7 +1056,7 @@ async function chatView(backView){
       <button class="btn dark" style="width:auto; padding:12px 14px" onclick="sendQuote()">${ic('tag',14)} Quote</button>
     </div>` : ''}
     <div class="chatin">
-      <input type="text" id="chatIn" placeholder="Type a message…" enterkeyhint="send"
+      <input type="text" id="chatIn" placeholder="${T('Type a message…')}" enterkeyhint="send"
         value="${esc(S.chatDraft || '')}" oninput="S.chatDraft=this.value"
         onkeydown="if(event.key==='Enter')sendChat()">
       <button onclick="sendChat()">${ic('send',17)}</button>
@@ -1103,17 +1125,15 @@ function askBeforeSharing(body){
   el.className = 'modalwrap'; el.id = 'confirmWrap';
   el.innerHTML = `
     <div class="modal">
-      <h3>Want them to come to you?</h3>
-      <p>Choosing <b class="k">${esc(c.name)}</b> sends them your exact pin and turn-by-turn
-         directions automatically — you don't have to type any of it out.</p>
-      ${waiting ? `<p>${ic('warn',13)} Heads up: choosing ends your request.
-        ${waiting} other compan${waiting===1?'y is':'ies are'} on this job${quoted ? ` and ${quoted} ${quoted===1?'has':'have'} already quoted` : ' and could still come back with a better price'} —
-        you won't see what they would have charged.</p>` : ''}
+      <h3>${T('Want them to come to you?')}</h3>
+      <p>${T('Choosing')} <b class="k">${esc(c.name)}</b> ${T("sends them your exact pin and turn-by-turn directions automatically — you don't have to type any of it out.")}</p>
+      ${waiting ? `<p>${ic('warn',13)} ${T('Heads up: choosing ends your request.')}
+        ${TN(waiting, '{n} other company is on this job', '{n} other companies are on this job')}${quoted ? TN(quoted, ' and {n} has already quoted', ' and {n} have already quoted') : T(' and could still come back with a better price')}${T(" — you won't see what they would have charged.")}</p>` : ''}
       <div class="acts">
-        <button class="btn ghost" onclick="sendAnyway()">Send it anyway</button>
-        <button class="btn" onclick="closeConfirm(); askChoose(${c.r},${c.p},'${esc(c.name).replace(/'/g,'')}')">${ic('check',15)} Choose them</button>
+        <button class="btn ghost" onclick="sendAnyway()">${T('Send it anyway')}</button>
+        <button class="btn" onclick="closeConfirm(); askChoose(${c.r},${c.p},'${esc(c.name).replace(/'/g,'')}')">${ic('check',15)} ${T('Choose them')}</button>
       </div>
-      <div class="faint" style="text-align:center; margin-top:10px">You're never forced to share your spot early.</div>
+      <div class="faint" style="text-align:center; margin-top:10px">${T("You're never forced to share your spot early.")}</div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
   document.body.appendChild(el);
@@ -1587,16 +1607,16 @@ function directions(lat, lng, opts = {}){
   const coords = `${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}`;
   return `
   <a class="btn ${opts.subtle ? 'ghost' : 'dark'}" style="display:block; text-align:center; text-decoration:none"
-     href="${primary.href}" target="_blank" rel="noopener">${ic('pin',16)} Get directions</a>
+     href="${primary.href}" target="_blank" rel="noopener">${ic('pin',16)} ${T('Get directions')}</a>
   <div class="row" style="gap:10px; margin-top:8px; flex-wrap:wrap; justify-content:flex-start">
-    <span class="faint">Open in:</span>
+    <span class="faint">${T('Open in:')}</span>
     ${alts.map(([n,h])=>`<a href="${h}" target="_blank" rel="noopener" class="faint" style="color:var(--red); font-weight:600">${n}</a>`).join('')}
-    <span class="faint" style="cursor:pointer; margin-left:auto" onclick="copyCoords('${coords}')" title="Copy the coordinates">${coords} ${ic('folder',11)}</span>
+    <span class="faint" style="cursor:pointer; margin-left:auto" onclick="copyCoords('${coords}')" title="${T('Copy the coordinates')}">${coords} ${ic('folder',11)}</span>
   </div>`;
 }
 function copyCoords(text){
   navigator.clipboard?.writeText(text).then(
-    () => toast('Coordinates copied'),
+    () => toast(T('Coordinates copied')),
     () => toast(text));
 }
 
@@ -1630,6 +1650,15 @@ async function vPPeople(){
         </select></div>
       <div><label class="f">Yard</label><select id="mb-loc">${locOpts}</select></div>
     </div>
+    <div class="grid2">
+      <div><label class="f">Their language</label>
+        <select id="mb-lang">
+          <option value="en">English</option>
+          <option value="es">Español (Spanish)</option>
+        </select>
+        <div class="faint" style="margin-top:6px">Their invite text and app arrive in this language. They can change it themselves later.</div>
+      </div>
+    </div>
     <div class="faint" style="margin:10px 0">A dispatcher tied to a yard is only alerted for leads near that yard. Leave it on "Any yard" to hear about everything.</div>
     <button class="btn" onclick="addMember()">${ic('plus',16)} Add to team &amp; text them the link</button>
   </div>` : ''}
@@ -1658,7 +1687,8 @@ async function addMember(){
   const name = qv('mb-name').trim(), phone = qv('mb-phone').trim();
   if (!name || !phone) return toast('Name and mobile number both needed');
   await api('POST', '/provider/members', { name, phone,
-    member_role: $('mb-role').value, member_location_id: $('mb-loc').value || null });
+    member_role: $('mb-role').value, member_location_id: $('mb-loc').value || null,
+    lang: $('mb-lang')?.value || 'en' });
   toast(name + ' added — we texted them a sign-in link');
   render();
 }
@@ -1922,6 +1952,11 @@ async function vPSettings(){
     <div class="checkrow"><span class="cico ${p.verification?.coi_file?'on':''}">${ic('check',15)}</span><span class="mini">Certificate of insurance ${p.verification?.coi_file ? '— uploaded' : '(upload)'}</span></div>
     <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${p.approved ? 'Approved — you can buy leads' : 'Pending RIGRX review'}</span></div>
     <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${p.license_verified ? 'License verified — you receive licensed-only leads' : 'License not verified — you miss licensed-only leads'}</span></div>
+  </div>
+  <div class="card">
+    <div class="row"><span class="sec">Spanish-speaking dispatch</span>
+      <span class="chips"><span class="chip ${p.spanish_dispatch?'sel':''}" id="es-dispatch" onclick="toggleSpanishDispatch(${p.spanish_dispatch ? 'false' : 'true'})">${p.spanish_dispatch ? 'ON' : 'OFF'}</span></span></div>
+    <div class="faint" style="margin-top:7px; line-height:1.5">Turn this on if someone answering your dispatch line speaks Spanish. Spanish-speaking drivers see a "Hablamos español" badge next to your name when comparing responders — it wins jobs.</div>
   </div>
   <div class="card"><span class="sec">Billing</span>
     <div class="mini" style="margin-top:7px; line-height:1.7">${S.simulatedPayments ? ic('zap',13)+' Payment simulation mode — connect Stripe keys to charge real cards' : ic('card',13)+' Card ····'+esc(p.card_last4 || '????')+' · one-tap lead purchase'}</div></div>
@@ -2595,7 +2630,7 @@ async function render(){
   const fn = VIEWS[S.view];
   // Chat takes over the phone screen — no tab bar, no page scroll behind it.
   document.body.classList.toggle('chatmode', S.view === 'd-chat' || S.view === 'p-chat');
-  if (!fn){ root.innerHTML = authShell('<div class="card">Page not found. <a onclick="nav(homeFor())">Go home</a></div>'); return; }
+  if (!fn){ root.innerHTML = authShell(`<div class="card">${T('Page not found.')} <a onclick="nav(homeFor())">${T('Go home')}</a></div>`); return; }
   let html;
   try { html = await fn(); }
   catch(e){ console.error(e); html = `<div class="card alert" style="margin-top:20px"><div class="mini">Couldn't load this page — check your connection and try again.</div></div>`; }
@@ -2610,26 +2645,27 @@ async function render(){
         S.me.member_role === 'tech' ? esc(S.me.name || 'Technician') + ' · technician'
         : S.me.member_role === 'dispatcher' ? esc(S.me.name || '') + ' · dispatcher'
         : (S.provider?.approved ? 'Verified provider' : 'Pending approval')}</span>`
-    : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? 'RIGRX admin' : 'Driver · ' + esc(S.me.phone)}</span>`;
+    : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? 'RIGRX admin' : T('Driver') + ' · ' + esc(S.me.phone)}</span>`;
   root.innerHTML = `
   <div class="shell">
     <div class="sidebar">
       <div class="slogo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
-      ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,19)} ${t.label}</button>`).join('')}
+      ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,19)} ${T(t.label)}</button>`).join('')}
       <div class="spacer"></div>
-      <button onclick="signOut()">${ic('out',18)} Sign out</button>
+      ${S.me.role === 'driver' ? `<button onclick="toggleLang()">${ic('chat',18)} ${getLang() === 'es' ? 'View in English' : 'Ver en español'}</button>` : ''}
+      <button onclick="signOut()">${ic('out',18)} ${T('Sign out')}</button>
       <div class="whoami">${who}</div>
     </div>
     <div class="main">
       <div class="topbar">
         <div class="logo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
-        <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])} &nbsp;·&nbsp; <a onclick="signOut()">Sign out</a></div>
+        <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])}${S.me.role === 'driver' ? ` &nbsp;·&nbsp; <a onclick="toggleLang()">${getLang() === 'es' ? 'EN' : 'ES'}</a>` : ''} &nbsp;·&nbsp; <a onclick="signOut()">${T('Sign out')}</a></div>
       </div>
       <div class="content${S.me.role==='driver' ? '' : ' wide'}">${html}</div>
     </div>
   </div>
   <div class="tabbar">
-    ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,21)}${t.label}</button>`).join('')}
+    ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,21)}${T(t.label)}</button>`).join('')}
   </div>`;
 }
 
@@ -2640,3 +2676,8 @@ async function render(){
   if (S.me) connectWS();
   nav(homeFor());
 })();
+
+async function toggleSpanishDispatch(on){
+  await api('POST', '/provider/spanish-dispatch', { on });
+  await loadMe(); toast(on ? 'Badge on — Spanish-speaking drivers will see it' : 'Badge off'); render();
+}

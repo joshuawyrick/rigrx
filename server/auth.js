@@ -17,7 +17,11 @@ async function requestCode(phone) {
   const code = String(crypto.randomInt(100000, 999999));
   const expires = new Date(Date.now() + 10 * 60 * 1000);
   await q('INSERT INTO otp_codes (phone, code, expires_at) VALUES ($1,$2,$3)', [phone, code, expires]);
-  await sms(null, phone, `Your RIGRX sign-in code is ${code}. It expires in 10 minutes.`);
+  // A returning Spanish-speaking user gets the code text in Spanish too.
+  const known = await one('SELECT lang FROM users WHERE phone=$1', [phone]);
+  await sms(null, phone, known?.lang === 'es'
+    ? `Su código de acceso RIGRX es ${code}. Vence en 10 minutos.`
+    : `Your RIGRX sign-in code is ${code}. It expires in 10 minutes.`);
   return DEV_MODE ? code : null; // in dev/simulation mode, surface the code so the app is testable
 }
 
