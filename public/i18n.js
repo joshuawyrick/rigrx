@@ -385,6 +385,14 @@
     'Coordinates copied': 'Coordenadas copiadas',
     'Copy the coordinates': 'Copiar las coordenadas',
 
+    // ---- city picker ----
+    'Start typing a city — any US city works': 'Empiece a escribir una ciudad — cualquier ciudad de EE. UU.',
+    'No matching city — check the spelling': 'No hay ciudad que coincida — revise la ortografía',
+    'What town are you closest to?': '¿A qué pueblo está más cerca?',
+    'Companies will see this as your general area. Add the exact mile marker on the next screen.': 'Las compañías verán esto como su área general. Agregue el marcador de milla exacto en la siguiente pantalla.',
+    'Use this town': 'Usar este pueblo',
+    'Start typing and pick a city from the list': 'Empiece a escribir y elija una ciudad de la lista',
+
     // ---- language ----
     'Language': 'Idioma',
 

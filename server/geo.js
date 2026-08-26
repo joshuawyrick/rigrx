@@ -149,13 +149,45 @@ function bearingLabel(fromLat, fromLng, toLat, toLng) {
   return ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg / 45) % 8];
 }
 
+/* ---- nationwide city database ----
+   16,000+ US cities in every state: [name, state, lat, lng, population],
+   population-sorted so search results rank the city people mean first.
+   Data derived from GeoNames (geonames.org, CC-BY 4.0) — free, offline,
+   no API key, no per-lookup cost. */
+const US_CITIES = require('./us-cities.json');
+
+function searchCities(query, limit = 12) {
+  let q = String(query || '').trim().toLowerCase();
+  if (q.length < 2) return [];
+  // "fresno ca" / "fresno, ca" narrows by state
+  let state = null;
+  const m = q.match(/^(.*?)[,\s]+([a-z]{2})$/);
+  if (m && m[1].length >= 2) { q = m[1].trim(); state = m[2].toUpperCase(); }
+  const out = [];
+  for (const c of US_CITIES) {
+    if (state && c[1] !== state) continue;
+    if (!c[0].toLowerCase().startsWith(q)) continue;
+    out.push({ label: `${c[0]}, ${c[1]}`, lat: c[2], lng: c[3] });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 function nearestPlace(lat, lng) {
   let best = null, bestD = Infinity;
+  // The curated corridor list keeps truck-stop towns like Buttonwillow in play;
+  // the nationwide list makes "Near X" work in all 50 states. Tiny places under
+  // 1,000 people lose to the corridor list on purpose.
   for (const p of PLACES) {
     const d = distanceMiles(lat, lng, p[2], p[3]);
-    if (d < bestD) { bestD = d; best = p; }
+    if (d < bestD) { bestD = d; best = { name: p[0], state: p[1], lat: p[2], lng: p[3] }; }
   }
-  return best ? { name: best[0], state: best[1], miles: bestD } : null;
+  for (const c of US_CITIES) {
+    if (c[4] < 1000) continue;
+    const d = distanceMiles(lat, lng, c[2], c[3]);
+    if (d < bestD) { bestD = d; best = { name: c[0], state: c[1], lat: c[2], lng: c[3] }; }
+  }
+  return best ? { ...best, miles: bestD } : null;
 }
 
 // The public label shown to providers before they buy.
@@ -164,11 +196,8 @@ function areaLabel(lat, lng) {
   const p = nearestPlace(lat, lng);
   if (!p) return '';
   if (p.miles <= 8) return `Near ${p.name}, ${p.state}`;
-  const dir = bearingLabel(
-    PLACES.find(x => x[0] === p.name && x[1] === p.state)[2],
-    PLACES.find(x => x[0] === p.name && x[1] === p.state)[3],
-    lat, lng);
+  const dir = bearingLabel(p.lat, p.lng, lat, lng);
   return `${Math.round(p.miles)} mi ${dir} of ${p.name}, ${p.state}`;
 }
 
-module.exports = { areaLabel, nearestPlace, distanceMiles, PLACES };
+module.exports = { areaLabel, nearestPlace, distanceMiles, searchCities, PLACES };

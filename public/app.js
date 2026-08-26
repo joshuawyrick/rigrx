@@ -658,11 +658,28 @@ function captureGPS(){
     { enableHighAccuracy: true, timeout: 10000 });
 }
 function manualLocation(){
-  const txt = prompt(T('Type the nearest town and state (example: Buttonwillow, CA)'));
-  if (!txt) return;
-  S.draft.lat = 35.4021; S.draft.lng = -119.4718;   // approximate; landmark carries the detail
-  S.draft.area_label = txt.trim();
-  S.draft.landmark = (S.draft.landmark || '') + (S.draft.landmark ? ' · ' : '') + txt.trim();
+  const el = document.createElement('div');
+  el.className = 'modalwrap'; el.id = 'confirmWrap';
+  el.innerHTML = `
+    <div class="modal">
+      <h3>${T('What town are you closest to?')}</h3>
+      <p>${T('Companies will see this as your general area. Add the exact mile marker on the next screen.')}</p>
+      ${cityPicker('manual-city')}
+      <div class="acts" style="margin-top:14px">
+        <button class="btn ghost" onclick="closeConfirm()">${T('Cancel')}</button>
+        <button class="btn" onclick="useManualCity()">${ic('check',15)} ${T('Use this town')}</button>
+      </div>
+    </div>`;
+  el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  document.body.appendChild(el);
+  setTimeout(()=>$('manual-city')?.focus(), 50);
+}
+function useManualCity(){
+  const c = S.pickedCity?.['manual-city'];
+  if (!c) return toast(T('Start typing and pick a city from the list'));
+  closeConfirm();
+  S.draft.lat = c.lat; S.draft.lng = c.lng;
+  S.draft.area_label = 'Near ' + c.label;
   toast(T('Saved — add a mile marker below so they can find you'));
   render();
 }
@@ -1171,12 +1188,40 @@ async function sendQuote(){
   toast('Quote sent'); render();
 }
 /* ---------------- provider onboarding ---------------- */
-const CITIES = [
-  ['Bakersfield, CA',35.3733,-119.0187],['Fresno, CA',36.7378,-119.7871],['Visalia, CA',36.3302,-119.2921],
-  ['Buttonwillow, CA',35.4021,-119.4718],['Lost Hills, CA',35.6164,-119.6943],['Mojave, CA',35.0525,-118.1739],
-  ['Barstow, CA',34.8958,-117.0173],['Lancaster, CA',34.6868,-118.1542],['Santa Clarita, CA',34.3917,-118.5426],
-  ['Los Angeles, CA',34.0549,-118.2426],['Stockton, CA',37.9577,-121.2908],['Sacramento, CA',38.5816,-121.4944]
-];
+/* ---- city type-ahead ----
+   Any US city, all 50 states — backed by the server's offline database of
+   16,000+ places. cityPicker() renders the input; the chosen city lands in
+   S.pickedCity[id] as { label, lat, lng }. */
+function cityPicker(id, placeholder){
+  return `
+  <div style="position:relative">
+    <input type="text" id="${id}" placeholder="${placeholder || T('Start typing a city — any US city works')}"
+      autocomplete="off" oninput="citySearch('${id}')">
+    <div id="${id}-list" class="citylist" style="display:none"></div>
+  </div>`;
+}
+let cityTimer = null;
+function citySearch(id){
+  const box = $(id), list = $(id + '-list');
+  delete (S.pickedCity || {})[id];
+  clearTimeout(cityTimer);
+  const q = box.value.trim();
+  if (q.length < 2){ list.style.display = 'none'; return; }
+  cityTimer = setTimeout(async () => {
+    let rows = [];
+    try { rows = await api('GET', '/geo/cities?q=' + encodeURIComponent(q)); } catch(e){}
+    list.innerHTML = rows.map(c =>
+      `<div class="cityopt" onclick='pickCity("${id}", ${JSON.stringify(c).replace(/'/g,"&#39;")})'>${ic('pin',12)} ${esc(c.label)}</div>`).join('')
+      || `<div class="cityopt muted">${T('No matching city — check the spelling')}</div>`;
+    list.style.display = 'block';
+  }, 180);
+}
+function pickCity(id, c){
+  S.pickedCity = S.pickedCity || {};
+  S.pickedCity[id] = c;
+  const box = $(id); if (box) box.value = c.label;
+  const list = $(id + '-list'); if (list) list.style.display = 'none';
+}
 
 
 // Picking a trade badges the company AND pre-checks the services that trade
@@ -1250,10 +1295,11 @@ function vPSetup2(){
   <div class="card" style="border-style:dashed">
     <span class="sec">Add a location</span>
     <label class="f">City / base</label>
-    <select id="loc-city">${CITIES.map(c=>`<option value="${c[1]},${c[2]}">${c[0]}</option>`).join('')}</select>
+    ${cityPicker('loc-city', 'Start typing any US city — e.g. Amarillo, TX')}
     <div class="grid2">
       <div><label class="f">Label</label><input type="text" id="loc-label" placeholder="Bakersfield — HQ"></div>
-      <div><label class="f">Service radius (miles)</label><input type="text" id="loc-radius" value="50"></div>
+      <div><label class="f">Service radius (miles)</label><input type="text" id="loc-radius" inputmode="numeric" value="50">
+        <div class="faint" style="margin-top:5px">Up to 5,000 — set it wide if you roll long-distance</div></div>
     </div>
     <label class="f">Location phone (optional)</label><input type="text" id="loc-phone" placeholder="(661) 555-0000">
     <div style="height:10px"></div>
@@ -1262,12 +1308,13 @@ function vPSetup2(){
   <button class="btn" onclick="${locs.length ? "nav('p-setup3')" : "toast('Add at least one location first')"}">Continue ${ic('arrowR',15)}</button>`, true);
 }
 async function addLocation(){
-  const [lat, lng] = qv('loc-city').split(',').map(Number);
-  const cityName = $('loc-city').selectedOptions[0].textContent;
+  const c = S.pickedCity?.['loc-city'];
+  if (!c) return toast('Pick a city from the list — start typing and choose one');
+  const radius = Math.min(5000, Math.max(5, parseInt(qv('loc-radius')) || 50));
   await api('POST', '/provider/locations', {
-    label: qv('loc-label') || cityName, lat, lng,
-    radius_mi: parseInt(qv('loc-radius')) || 50, phone: qv('loc-phone') });
-  await loadMe(); toast('Location added'); render();
+    label: qv('loc-label') || c.label, lat: c.lat, lng: c.lng,
+    radius_mi: radius, phone: qv('loc-phone') });
+  await loadMe(); toast('Location added — ' + radius + ' mi radius'); render();
 }
 async function delLocation(id){
   await api('DELETE', '/provider/locations/' + id);

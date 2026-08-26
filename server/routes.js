@@ -8,7 +8,7 @@ const auth = require('./auth');
 const { chargeLead, refund, SIMULATED, cardSetup, saveCard } = require('./payments');
 const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand } = require('./match');
-const { areaLabel } = require('./geo');
+const { areaLabel, searchCities } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
 const EQUIP = require('./equipment');
 // Same file the browser loads, so a message is judged identically on both sides.
@@ -348,12 +348,17 @@ router.put('/provider/profile', requireOwner, async (req, res) => {
   res.json(p);
 });
 
+// Type-ahead city search against the offline nationwide database.
+router.get('/geo/cities', auth.requireAuth, async (req, res) => {
+  res.json(searchCities(req.query.q, 12));
+});
+
 router.post('/provider/locations', requireOwner, async (req, res) => {
   const { label, lat, lng, radius_mi = 50, phone = '' } = req.body;
   if (typeof lat !== 'number' || typeof lng !== 'number') return res.status(400).json({ error: 'lat/lng required' });
   const l = await one(
     'INSERT INTO provider_locations (user_id, label, lat, lng, radius_mi, phone) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-    [companyIdOf(req.user), label || '', lat, lng, Math.min(200, Math.max(5, radius_mi)), phone]);
+    [companyIdOf(req.user), label || '', lat, lng, Math.min(5000, Math.max(5, Number(radius_mi) || 50)), phone]);
   res.json(l);
 });
 router.delete('/provider/locations/:id', requireOwner, async (req, res) => {

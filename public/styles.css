@@ -261,3 +261,11 @@
   .btn.chat:hover{background:#000;}
   .btn.choose{background:#fff; color:var(--red); border:1.5px solid var(--red);}
   .btn.choose:hover{background:var(--red-tint);}
+
+  /* ---------- city type-ahead ---------- */
+  .citylist{position:absolute; top:calc(100% + 4px); left:0; right:0; background:var(--panel);
+    border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.12);
+    max-height:240px; overflow-y:auto; z-index:60;}
+  .cityopt{padding:11px 13px; font-size:14px; cursor:pointer; display:flex; align-items:center; gap:7px;}
+  .cityopt:hover{background:var(--soft);}
+  .cityopt.muted{color:var(--muted); cursor:default;}
