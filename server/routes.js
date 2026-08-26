@@ -5,7 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { q, one } = require('./db');
 const auth = require('./auth');
-const { chargeLead, refund, SIMULATED } = require('./payments');
+const { chargeLead, refund, SIMULATED, cardSetup, saveCard } = require('./payments');
 const { sms, wsPush } = require('./notify');
 const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand } = require('./match');
 const { areaLabel } = require('./geo');
@@ -675,6 +675,7 @@ router.get('/leads/:id', requireDispatch, async (req, res) => {
     capability_warning: capabilityWarning(p, r),
     driver_rating: driver.rating_count ? +(driver.rating_sum / driver.rating_count).toFixed(1) : null,
     slots, price_cents: slots.premiumOpen ? r.premium_cents : r.standard_cents, premium: slots.premiumOpen,
+    my_credits: p?.lead_credits || 0,
     purchased: !!mine, selected_provider: r.selected_provider
   };
   if (mine) {
@@ -729,14 +730,37 @@ router.post('/leads/:id/buy', requireDispatch, async (req, res) => {
   const premium = slots.premiumOpen;
   const amount = premium ? r.premium_cents : r.standard_cents;
 
-  const charge = await chargeLead(p, amount, `RIGRX lead #${r.id} — ${r.service_label}${premium ? ' (premium slot)' : ''}`);
-  if (!charge.ok) return res.status(402).json({ error: 'Card charge failed: ' + (charge.error || 'declined') });
+  // Free credits spend first — that's the "first leads free" offer working. The
+  // decrement is atomic, so two dispatchers buying at once can't spend one credit
+  // twice. Only when the balance is zero does a card come into it.
+  let paidWith = 'card', paymentId = '', charged = amount;
+  const spent = await one(
+    `UPDATE providers SET lead_credits = lead_credits - 1
+     WHERE user_id=$1 AND lead_credits > 0 RETURNING lead_credits`, [companyIdOf(req.user)]);
+  if (spent) {
+    paidWith = 'credit'; paymentId = 'credit'; charged = 0;
+    await q(`INSERT INTO credit_log (provider_id, delta, reason) VALUES ($1,-1,$2)`,
+      [companyIdOf(req.user), `Spent on lead #${r.id}`]);
+  } else {
+    if (!SIMULATED() && !p.stripe_pm)
+      return res.status(402).json({ error: 'No card on file. Add one in Settings → Billing to keep buying leads.' });
+    const charge = await chargeLead(p, amount, `RIGRX lead #${r.id} — ${r.service_label}${premium ? ' (premium slot)' : ''}`);
+    if (!charge.ok) return res.status(402).json({ error: 'Your card was declined — update it in Settings → Billing and try again. This lead is still open.' });
+    paymentId = charge.paymentId;
+  }
 
   const slot = slots.total + 1;
   try {
-    await q(`INSERT INTO purchases (request_id, provider_id, slot, amount_cents, premium, stripe_payment)
-             VALUES ($1,$2,$3,$4,$5,$6)`, [r.id, companyIdOf(req.user), slot, amount, premium, charge.paymentId]);
+    await q(`INSERT INTO purchases (request_id, provider_id, slot, amount_cents, premium, stripe_payment, paid_with, list_price_cents)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [r.id, companyIdOf(req.user), slot, charged, premium, paymentId, paidWith, amount]);
   } catch (e) {
+    // The slot vanished between check and insert. Undo whatever was taken.
+    if (paidWith === 'credit') {
+      await q(`UPDATE providers SET lead_credits = lead_credits + 1 WHERE user_id=$1`, [companyIdOf(req.user)]);
+      await q(`INSERT INTO credit_log (provider_id, delta, reason) VALUES ($1,1,$2)`,
+        [companyIdOf(req.user), `Returned — lead #${r.id} slot was taken`]);
+    } else if (paymentId && paymentId !== 'simulated') await refund(paymentId);
     return res.status(409).json({ error: 'Slot was just taken — refresh the lead' });
   }
 
@@ -747,7 +771,9 @@ router.post('/leads/:id/buy', requireDispatch, async (req, res) => {
     `RIGRX: ${p.name} unlocked your ${r.service_label} request and can now contact you. Open the app to chat.`,
     `RIGRX: ${p.name} respondió a su solicitud de ${r.service_label} y ya puede contactarlo. Abra la app para chatear.`));
 
-  res.json({ ok: true, slot, premium, amount_cents: amount, simulated: charge.paymentId === 'simulated' });
+  res.json({ ok: true, slot, premium, amount_cents: charged, paid_with: paidWith,
+             credits_left: spent ? spent.lead_credits : undefined,
+             simulated: paymentId === 'simulated' });
 });
 
 router.get('/myleads', requireDispatch, async (req, res) => {
@@ -1269,15 +1295,16 @@ router.get('/admin/providers/:id', auth.requireRole('admin'), async (req, res) =
            u.archived_at, u.archive_reason
     FROM providers p JOIN users u ON u.id=p.user_id WHERE p.user_id=$1`, [req.params.id]);
   if (!p) return res.status(404).json({ error: 'Not found' });
-  const [locations, custom, stats, reviews] = await Promise.all([
+  const [locations, custom, stats, reviews, credits] = await Promise.all([
     q('SELECT * FROM provider_locations WHERE user_id=$1 ORDER BY id', [req.params.id]),
     q('SELECT * FROM custom_services WHERE user_id=$1 ORDER BY id', [req.params.id]),
     one(`SELECT COUNT(*)::int AS leads_bought, COALESCE(SUM(amount_cents),0)::int AS spend
          FROM purchases WHERE provider_id=$1 AND refunded=FALSE`, [req.params.id]),
-    q(`SELECT stars, comment, created_at FROM reviews WHERE target_provider=$1 ORDER BY id DESC LIMIT 5`, [req.params.id])
+    q(`SELECT stars, comment, created_at FROM reviews WHERE target_provider=$1 ORDER BY id DESC LIMIT 5`, [req.params.id]),
+    q(`SELECT delta, reason, by_admin, created_at FROM credit_log WHERE provider_id=$1 ORDER BY id DESC LIMIT 10`, [req.params.id])
   ]);
   res.json({
-    ...p, locations, custom, stats, reviews,
+    ...p, locations, custom, stats, reviews, credit_log: credits,
     rating: p.rating_count ? +(p.rating_sum / p.rating_count).toFixed(1) : null
   });
 });
@@ -1333,10 +1360,79 @@ router.get('/admin/purchases', auth.requireRole('admin'), async (req, res) => {
 router.post('/admin/purchases/:id/refund', auth.requireRole('admin'), async (req, res) => {
   const pu = await one('SELECT * FROM purchases WHERE id=$1', [req.params.id]);
   if (!pu) return res.status(404).json({ error: 'Not found' });
-  const r = await refund(pu.stripe_payment);
-  if (!r.ok) return res.status(400).json({ error: r.error });
+  if (pu.refunded) return res.status(400).json({ error: 'Already refunded' });
+  if (pu.paid_with === 'credit') {
+    // Bought with a free credit: the refund is the credit coming back.
+    await q('UPDATE providers SET lead_credits = lead_credits + 1 WHERE user_id=$1', [pu.provider_id]);
+    await q(`INSERT INTO credit_log (provider_id, delta, reason, by_admin) VALUES ($1,1,$2,TRUE)`,
+      [pu.provider_id, `Refund of lead #${pu.request_id}`]);
+  } else {
+    const r = await refund(pu.stripe_payment);
+    if (!r.ok) return res.status(400).json({ error: r.error });
+  }
   await q('UPDATE purchases SET refunded=TRUE WHERE id=$1', [req.params.id]);
   res.json({ ok: true });
+});
+
+/* ---- admin settings ---- */
+router.get('/admin/settings', auth.requireRole('admin'), async (req, res) => {
+  const rows = await q('SELECT key, value FROM settings');
+  res.json(Object.fromEntries(rows.map(r => [r.key, r.value])));
+});
+router.put('/admin/settings/welcome-credits', auth.requireRole('admin'), async (req, res) => {
+  const n = Math.max(0, Math.min(100, Math.round(Number(req.body.value))));
+  if (Number.isNaN(n)) return res.status(400).json({ error: 'Enter a number' });
+  await q(`INSERT INTO settings (key, value) VALUES ('welcome_credits', $1)
+           ON CONFLICT (key) DO UPDATE SET value = $1`, [String(n)]);
+  res.json({ ok: true, welcome_credits: n });
+});
+
+/* ---- free lead credits (admin-granted) ---- */
+router.post('/admin/providers/:id/credits', auth.requireRole('admin'), async (req, res) => {
+  const delta = Math.max(-100, Math.min(100, Number(req.body.delta) || 0));
+  if (!delta) return res.status(400).json({ error: 'How many credits?' });
+  const p = await one(
+    `UPDATE providers SET lead_credits = GREATEST(0, lead_credits + $1) WHERE user_id=$2 RETURNING lead_credits`,
+    [delta, req.params.id]);
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  await q(`INSERT INTO credit_log (provider_id, delta, reason, by_admin) VALUES ($1,$2,$3,TRUE)`,
+    [req.params.id, delta, String(req.body.reason || '').slice(0, 120) || (delta > 0 ? 'Granted by RIGRX' : 'Adjusted by RIGRX')]);
+  // Free leads are a gift — make sure the shop knows they got it.
+  if (delta > 0) {
+    const u = await one('SELECT id, phone, lang FROM users WHERE id=$1', [req.params.id]);
+    if (u) await sms(u.id, u.phone, inLang(u,
+      `RIGRX: You have ${p.lead_credits} free lead${p.lead_credits === 1 ? '' : 's'} on your account. They're used automatically when you unlock a lead.`,
+      `RIGRX: Tiene ${p.lead_credits} aviso${p.lead_credits === 1 ? '' : 's'} gratis en su cuenta. Se usan automáticamente al desbloquear un aviso.`));
+  }
+  res.json({ ok: true, lead_credits: p.lead_credits });
+});
+
+/* ---- card collection (Stripe Elements + SetupIntent) ---- */
+// Step 1: the client asks to add a card. We make (or reuse) the Stripe customer
+// and hand back a SetupIntent secret for Stripe Elements to collect against.
+router.post('/provider/card-setup', requireOwner, async (req, res) => {
+  if (SIMULATED()) return res.status(400).json({ error: 'Payments are in simulation mode — no Stripe keys are set yet' });
+  const p = await providerOf(req);
+  if (!p) return res.status(400).json({ error: 'Complete your company profile first' });
+  const setup = await cardSetup(p, p.name, p.email);
+  if (!setup) return res.status(500).json({ error: 'Could not start card setup' });
+  if (setup.customerId !== p.stripe_customer)
+    await q('UPDATE providers SET stripe_customer=$1 WHERE user_id=$2', [setup.customerId, p.user_id]);
+  res.json({ clientSecret: setup.clientSecret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || '' });
+});
+
+// Step 2: Elements confirmed the card. Verify it server-side and make it the
+// company's charging default. The card number itself never touched our server.
+router.post('/provider/card-saved', requireOwner, async (req, res) => {
+  if (SIMULATED()) return res.status(400).json({ error: 'Payments are in simulation mode' });
+  const p = await providerOf(req);
+  const pmId = String(req.body.payment_method || '');
+  if (!p?.stripe_customer || !pmId) return res.status(400).json({ error: 'Card setup incomplete' });
+  const card = await saveCard(p.stripe_customer, pmId);
+  if (!card) return res.status(400).json({ error: "That card didn't save — try again" });
+  await q('UPDATE providers SET stripe_pm=$1, card_last4=$2, card_brand=$3 WHERE user_id=$4',
+    [pmId, card.last4, card.brand, p.user_id]);
+  res.json({ ok: true, last4: card.last4, brand: card.brand });
 });
 
 router.get('/admin/custom-services', auth.requireRole('admin'), async (req, res) => {

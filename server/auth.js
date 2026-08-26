@@ -14,6 +14,20 @@ function normalizePhone(raw) {
 }
 
 async function requestCode(phone) {
+  // Rate limits, because with Twilio live every code is a text that costs money:
+  // at most 5 codes per phone per hour, and no new code within 30 seconds of the
+  // last (stops double-taps and scripts without ever locking out a real person).
+  const recent = await one(
+    `SELECT COUNT(*)::int AS n, MAX(created_at) AS last FROM otp_codes
+     WHERE phone=$1 AND created_at > NOW() - INTERVAL '1 hour'`, [phone]);
+  if (recent.n >= 5) {
+    const err = new Error('Too many codes requested for this number. Try again in an hour, or call RIGRX if you are stuck.');
+    err.status = 429; throw err;
+  }
+  if (recent.last && Date.now() - new Date(recent.last).getTime() < 30 * 1000) {
+    const err = new Error('We just sent a code — give it 30 seconds to arrive before requesting another.');
+    err.status = 429; throw err;
+  }
   const code = String(crypto.randomInt(100000, 999999));
   const expires = new Date(Date.now() + 10 * 60 * 1000);
   await q('INSERT INTO otp_codes (phone, code, expires_at) VALUES ($1,$2,$3)', [phone, code, expires]);
@@ -26,10 +40,24 @@ async function requestCode(phone) {
 }
 
 async function verifyCode(phone, code) {
+  // A 6-digit code has a million combinations; without an attempt cap that is
+  // guessable by script. Six wrong tries kills every live code for the number.
+  const tries = await one(
+    `SELECT COALESCE(SUM(attempts),0)::int AS n FROM otp_codes
+     WHERE phone=$1 AND used=FALSE AND expires_at > NOW()`, [phone]);
+  if (tries.n >= 6) {
+    const err = new Error('Too many wrong attempts. Request a fresh code.');
+    err.status = 429; throw err;
+  }
   const row = await one(
     `SELECT * FROM otp_codes WHERE phone=$1 AND code=$2 AND used=FALSE AND expires_at > NOW()
      ORDER BY id DESC LIMIT 1`, [phone, code]);
-  if (!row) return null;
+  if (!row) {
+    await q(`UPDATE otp_codes SET attempts = attempts + 1
+             WHERE id = (SELECT id FROM otp_codes WHERE phone=$1 AND used=FALSE AND expires_at > NOW()
+                         ORDER BY id DESC LIMIT 1)`, [phone]);
+    return null;
+  }
   await q('UPDATE otp_codes SET used=TRUE WHERE id=$1', [row.id]);
   return true;
 }

@@ -50,8 +50,10 @@ app.get(['/for-service-companies', '/service-companies', '/providers'], (req, re
 
 app.get('*', sendIndex);
 
-// central error handler
+// central error handler. Errors that carry a status (like the sign-in rate
+// limits) speak for themselves; anything else stays a generic 500.
 app.use((err, req, res, next) => {
+  if (err && err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
   console.error(err);
   res.status(500).json({ error: 'Something went wrong on our end' });
 });

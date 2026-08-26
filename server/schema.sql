@@ -341,3 +341,41 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT NOT NULL DEFAULT '';
 -- A company that answers dispatch calls in Spanish can say so; drivers see the
 -- badge when comparing responders — language becomes a reason to win the job.
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS spanish_dispatch BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ---- free lead credits ----
+-- The "first 10 leads free" offer, as a real feature: the admin grants credits,
+-- and buying a lead spends a credit before any card is ever touched. A credit
+-- purchase records amount_cents = 0, so revenue numbers stay honest.
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS lead_credits INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS paid_with TEXT NOT NULL DEFAULT 'card';  -- card | credit
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS list_price_cents INTEGER;                -- what it WOULD have cost
+CREATE TABLE IF NOT EXISTS credit_log (
+  id          SERIAL PRIMARY KEY,
+  provider_id INTEGER NOT NULL REFERENCES providers(user_id) ON DELETE CASCADE,
+  delta       INTEGER NOT NULL,               -- +10 granted, -1 spent, +1 refund
+  reason      TEXT NOT NULL DEFAULT '',       -- 'beta welcome' | 'spent on lead #12' | ...
+  by_admin    BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_credit_log_provider ON credit_log(provider_id);
+
+-- ---- stripe customer ----
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS stripe_customer TEXT NOT NULL DEFAULT '';
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS card_brand TEXT NOT NULL DEFAULT '';
+
+-- ---- sign-in code rate limiting ----
+-- Once Twilio is live every code is a real text that costs real money, so both
+-- directions get a ceiling: how fast codes can be requested, and how many wrong
+-- guesses a code survives.
+ALTER TABLE otp_codes ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_otp_phone_created ON otp_codes(phone, created_at DESC);
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS stripe_pm TEXT NOT NULL DEFAULT '';
+
+-- ---- admin-tunable settings ----
+-- Small key/value store for numbers the admin should be able to change without a
+-- code change. First use: how many free lead credits the welcome button grants.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO settings (key, value) VALUES ('welcome_credits', '5') ON CONFLICT (key) DO NOTHING;

@@ -1435,6 +1435,9 @@ async function vPFeed(){
   <h2 class="scr">Live Leads</h2>
   <p class="scrsub">Open requests inside your coverage that match your services</p>
   ${pendingBanner(d.approved)}
+  ${(S.provider?.lead_credits || 0) > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
+    <div class="mini" style="color:#14603a; line-height:1.5"><b class="k" style="color:#14603a">${S.provider.lead_credits} free lead${S.provider.lead_credits===1?'':'s'} on your account</b> — unlocking a lead uses one automatically. No charge.</div>
+  </div>` : ''}
   ${d.approved && !d.license_verified ? `<div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Your license isn't verified yet.</b>
     ${d.missed_licensed_leads ? `You missed <b class="k">${d.missed_licensed_leads} lead${d.missed_licensed_leads===1?'':'s'}</b> this week from drivers who asked for licensed companies only.` : 'Some drivers request licensed companies only, and those leads stay hidden from you.'}
@@ -1539,15 +1542,21 @@ async function vPLead(){
   ${l.selected_provider === S.me.id ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
   ` : `
   <div class="card alert"><div class="mini" style="line-height:1.55">${ic('zap',13)} First 3 buyers get this lead at the standard price. After that, one final <b class="k">premium slot</b> at 2×. Max 4 companies ever see this driver's info.</div></div>
-  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}</button>
-  <div class="faint" style="text-align:center; margin-top:9px">${S.simulatedPayments ? 'Payment simulation mode — no real charge' : ic('card',12) + ' Charged to your card on file'} · unreachable-driver refund policy applies</div>`}
+  ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
+    <div class="mini" style="line-height:1.5; color:#14603a"><b class="k" style="color:#14603a">${l.my_credits} free lead${l.my_credits===1?'':'s'} on your account.</b> This unlock uses one — your card is not touched.</div>
+  </div>` : ''}
+  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? `UNLOCK FREE — 1 CREDIT` : `${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}`}</button>
+  <div class="faint" style="text-align:center; margin-top:9px">${l.my_credits > 0 ? 'No charge — you have free leads left' : S.simulatedPayments ? 'Payment simulation mode — no real charge' : ic('card',12) + ' Charged to your card on file'} · unreachable-driver refund policy applies</div>`}
   </div></div>`;
 }
 async function buyLead(btn){
   btn.disabled = true; btn.textContent = 'Processing…';
   try {
     const res = await api('POST', `/leads/${S.leadId}/buy`);
-    toast(`Lead unlocked — you're responder ${res.slot} of 4${res.simulated ? ' (simulated payment)' : ''}`);
+    toast(res.paid_with === 'credit'
+      ? `Lead unlocked with a free credit — ${res.credits_left} left`
+      : `Lead unlocked — you're responder ${res.slot} of 4${res.simulated ? ' (simulated payment)' : ''}`);
+    await loadMe();   // keep the credit balance in the sidebar honest
     render();
   } catch(e){ render(); }
 }
@@ -1959,7 +1968,18 @@ async function vPSettings(){
     <div class="faint" style="margin-top:7px; line-height:1.5">Turn this on if someone answering your dispatch line speaks Spanish. Spanish-speaking drivers see a "Hablamos español" badge next to your name when comparing responders — it wins jobs.</div>
   </div>
   <div class="card"><span class="sec">Billing</span>
-    <div class="mini" style="margin-top:7px; line-height:1.7">${S.simulatedPayments ? ic('zap',13)+' Payment simulation mode — connect Stripe keys to charge real cards' : ic('card',13)+' Card ····'+esc(p.card_last4 || '????')+' · one-tap lead purchase'}</div></div>
+    ${p.lead_credits > 0 ? `<div class="mini" style="margin-top:7px; color:#14603a"><b class="k" style="color:#14603a">${p.lead_credits} free lead${p.lead_credits===1?'':'s'} remaining</b> — used automatically before your card.</div>` : ''}
+    <div class="mini" style="margin-top:7px; line-height:1.7">
+      ${S.simulatedPayments
+        ? ic('zap',13)+' Payment simulation mode — no card needed yet'
+        : p.card_last4
+          ? ic('card',13)+' '+esc((p.card_brand || 'Card').toUpperCase())+' ····'+esc(p.card_last4)+' · charged when you unlock a lead'
+          : ic('warn',13)+' <b class="k">No card on file.</b> Once your free leads run out you will need one to keep buying.'}
+    </div>
+    ${!S.simulatedPayments && isOwner() ? `<div style="height:10px"></div>
+      <button class="btn ghost" style="width:auto; padding:10px 16px" onclick="openCardModal()">${ic('card',15)} ${p.card_last4 ? 'Replace card' : 'Add a card'}</button>` : ''}
+    <div id="cardBox"></div>
+  </div>
   </div></div>`;
 }
 
@@ -2184,6 +2204,8 @@ async function toggleWaitlist(id){
 }
 async function vAProvider(){
   const p = await api('GET', '/admin/providers/' + S.adminProviderId);
+  const cfg = await api('GET', '/admin/settings').catch(()=>({}));
+  const welcome = Math.max(0, Number(cfg.welcome_credits ?? 5) || 0);
   const v = p.verification || {};
   const svcCount = Object.values(p.services || {}).reduce((a,b)=>a+(b?.length||0),0);
   const missing = [];
@@ -2257,6 +2279,24 @@ async function vAProvider(){
     <div class="faint" style="margin-top:8px; line-height:1.5">Verified companies also receive requests from drivers who chose "licensed companies only." Approval and license verification are separate — an unlicensed company can still work on RIGRX.</div>
   </div>
 
+  <div class="card" style="border-color:#1a7f43">
+    <span class="sec">Free lead credits</span>
+    <div class="row" style="margin-top:8px">
+      <span class="mini">Balance</span>
+      <b class="k" style="font-size:20px; color:${p.lead_credits > 0 ? '#14603a' : 'var(--muted)'}">${p.lead_credits || 0}</b>
+    </div>
+    <div class="faint" style="margin:6px 0 10px; line-height:1.5">Credits are spent automatically before their card is ever charged — this is how the "first leads free" beta offer is delivered. They get a text when you grant them. The welcome amount is set on the <a onclick="nav('a-pricing')">Pricing</a> page; the box below is for special cases.</div>
+    <div class="row" style="gap:8px; flex-wrap:wrap">
+      ${welcome > 0 ? `<button class="btn dark" style="width:auto; padding:10px 14px; font-size:12.5px" onclick="grantCredits(${p.user_id}, ${welcome})">+${welcome} beta welcome</button>` : ''}
+      <span style="display:inline-flex; gap:6px; align-items:center">
+        <input type="text" id="cr-amt" placeholder="±" inputmode="numeric" style="width:64px; padding:9px">
+        <button class="btn ghost" style="width:auto; padding:10px 14px; font-size:12.5px" onclick="grantCredits(${p.user_id}, null)">Apply</button>
+      </span>
+    </div>
+    ${(p.credit_log||[]).length ? `<div class="divider"></div>
+      <div class="mini listline">${p.credit_log.map(c=>`<span class="muted">${timeAgo(c.created_at)}</span> &nbsp;<b class="k">${c.delta > 0 ? '+'+c.delta : c.delta}</b> ${esc(c.reason)}`).join('<br>')}</div>` : ''}
+  </div>
+
   <div class="card">
     <span class="sec">Platform access</span>
     <div class="faint" style="margin:6px 0 10px; line-height:1.5">Approved companies see leads and can buy them. Suspending stops both immediately.</div>
@@ -2278,6 +2318,18 @@ async function vAProvider(){
     ${p.reviews.map(r=>`<div class="checkrow"><div><div>${star5(r.stars)} <span class="faint">${timeAgo(r.created_at)}</span></div>${r.comment?`<div class="mini" style="margin-top:3px">"${esc(r.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
   </div></div>`;
 }
+async function saveWelcomeCredits(){
+  const r = await api('PUT', '/admin/settings/welcome-credits', { value: qv('set-welcome') });
+  toast(`Welcome button now grants ${r.welcome_credits} free lead${r.welcome_credits===1?'':'s'}`);
+  render();
+}
+async function grantCredits(id, amount){
+  const delta = amount != null ? amount : Number(qv('cr-amt'));
+  if (!delta) return toast('Enter how many credits (use a minus sign to take back)');
+  const r = await api('POST', `/admin/providers/${id}/credits`, { delta, reason: delta > 0 ? 'Beta welcome — first leads free' : 'Adjustment' });
+  toast(`Balance is now ${r.lead_credits} free lead${r.lead_credits===1?'':'s'}`);
+  render();
+}
 async function adminProv(id, action){
   await api('POST', `/admin/providers/${id}/${action}`);
   toast(action==='approve' ? 'Provider approved & notified' : 'Provider suspended'); render();
@@ -2292,9 +2344,21 @@ async function saveAdminNotes(id){
 }
 async function vAPricing(){
   const rows = await api('GET', '/admin/pricing');
+  const cfg = await api('GET', '/admin/settings').catch(()=>({}));
   return `
   <h2 class="scr">Lead Pricing</h2>
   <p class="scrsub">Per service type — standard slots (×3) and the premium 4th slot</p>
+  <div class="card" style="border-color:#1a7f43">
+    <div class="row" style="flex-wrap:wrap; gap:10px">
+      <div><b class="mini k">Beta welcome credits</b>
+        <div class="faint" style="margin-top:3px; line-height:1.5">What the one-tap welcome button on a company's page grants. Set it to 0 to hide the button — every grant is still manual, per company, and logged.</div>
+      </div>
+      <span style="display:inline-flex; gap:8px; align-items:center">
+        <input type="text" id="set-welcome" inputmode="numeric" value="${esc(cfg.welcome_credits ?? '5')}" style="width:70px; padding:8px">
+        <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="saveWelcomeCredits()">Save</button>
+      </span>
+    </div>
+  </div>
   ${rows.map(p=>`<div class="card">
     <div class="row" style="flex-wrap:wrap; gap:10px"><b class="mini k" style="min-width:180px">${esc(p.label)}</b>
       <span style="display:inline-flex; gap:8px; align-items:center">
@@ -2680,4 +2744,57 @@ async function render(){
 async function toggleSpanishDispatch(on){
   await api('POST', '/provider/spanish-dispatch', { on });
   await loadMe(); toast(on ? 'Badge on — Spanish-speaking drivers will see it' : 'Badge off'); render();
+}
+
+/* ---------------- card collection (Stripe Elements) ----------------
+   The card form is Stripe's own iframe, loaded only when the owner asks to add a
+   card — the number never exists anywhere in RIGRX. */
+let stripeJs = null;
+function loadStripeJs(){
+  return new Promise((resolve, reject) => {
+    if (window.Stripe) return resolve();
+    const sc = document.createElement('script');
+    sc.src = 'https://js.stripe.com/v3/';
+    sc.onload = resolve; sc.onerror = () => reject(new Error('Could not load Stripe'));
+    document.head.appendChild(sc);
+  });
+}
+async function openCardModal(){
+  let setup;
+  try { setup = await api('POST', '/provider/card-setup'); } catch(e){ return; }
+  try { await loadStripeJs(); } catch(e){ return toast('Could not load the card form — check your connection'); }
+  if (!setup.publishableKey) return toast('Stripe publishable key missing — add STRIPE_PUBLISHABLE_KEY to your secrets');
+  const stripe = Stripe(setup.publishableKey);
+  const elements = stripe.elements({ clientSecret: setup.clientSecret });
+  const el = document.createElement('div');
+  el.className = 'modalwrap'; el.id = 'confirmWrap';
+  el.innerHTML = `
+    <div class="modal">
+      <h3>Add a card</h3>
+      <p>Charged only when you unlock a lead. You can replace it anytime.</p>
+      <div id="pay-el" style="margin:14px 0"></div>
+      <div class="acts">
+        <button class="btn ghost" onclick="closeConfirm()">Cancel</button>
+        <button class="btn" id="saveCardBtn" onclick="saveCardNow()">${ic('check',15)} Save card</button>
+      </div>
+      <div class="faint" style="text-align:center; margin-top:10px">Card details go straight to Stripe — RIGRX never sees the number.</div>
+    </div>`;
+  document.body.appendChild(el);
+  const payEl = elements.create('payment');
+  payEl.mount('#pay-el');
+  S._stripe = { stripe, elements };
+}
+async function saveCardNow(){
+  const btn = $('saveCardBtn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const { stripe, elements } = S._stripe || {};
+  if (!stripe) return closeConfirm();
+  const { setupIntent, error } = await stripe.confirmSetup({ elements, redirect: 'if_required' });
+  if (error){ toast(error.message || 'Card was not accepted'); btn.disabled = false; btn.textContent = 'Save card'; return; }
+  try {
+    const r = await api('POST', '/provider/card-saved', { payment_method: setupIntent.payment_method });
+    closeConfirm();
+    toast(`Card saved — ${(r.brand || 'card').toUpperCase()} ending ${r.last4}`);
+    await loadMe(); render();
+  } catch(e){ btn.disabled = false; btn.textContent = 'Save card'; }
 }
