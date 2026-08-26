@@ -379,3 +379,21 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL DEFAULT ''
 );
 INSERT INTO settings (key, value) VALUES ('welcome_credits', '5') ON CONFLICT (key) DO NOTHING;
+
+-- ---- closing the loop ----
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS selected_at    TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS silent_alerted BOOLEAN NOT NULL DEFAULT FALSE;  -- admin was texted: nobody bought
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS stall_alerted  BOOLEAN NOT NULL DEFAULT FALSE;  -- company was nudged: won it, hasn't moved
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS expire_warned  BOOLEAN NOT NULL DEFAULT FALSE;  -- driver was warned before auto-close
+
+-- Shops rating drivers: one rating per company per job. Rolls up onto the
+-- driver's rating shown on every lead ('as rated by providers').
+CREATE TABLE IF NOT EXISTS driver_ratings (
+  id          SERIAL PRIMARY KEY,
+  request_id  INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  provider_id INTEGER NOT NULL REFERENCES providers(user_id) ON DELETE CASCADE,
+  driver_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  stars       INTEGER NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (request_id, provider_id)
+);

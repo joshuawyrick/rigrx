@@ -79,9 +79,11 @@ wss.on('connection', async (socket, req) => {
   } catch (e) { socket.close(); }
 });
 
-// Every minute, hand back any job a tech was given but never accepted.
+// Every minute: hand back unaccepted jobs, page the admin about silent requests,
+// nudge stalled winners, and expire stale requests.
 setInterval(() => {
   routes.sweepUnacceptedJobs?.().catch(e => console.error('job sweep failed:', e.message));
+  routes.sweepMarketplace?.().catch(e => console.error('marketplace sweep failed:', e.message));
 }, 60 * 1000).unref();
 
 const PORT = process.env.PORT || 3000;

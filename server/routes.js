@@ -41,7 +41,19 @@ const storage = multer.diskStorage({
   destination: path.join(__dirname, '..', 'uploads'),
   filename: (req, file, cb) => cb(null, crypto.randomBytes(8).toString('hex') + path.extname(file.originalname).slice(0, 8))
 });
-const upload = multer({ storage, limits: { fileSize: 8 * 1024 * 1024 } });
+// Only photos and PDFs. Without this, any signed-in user could upload an .html
+// file and have it served from this domain — a hosted phishing page with our name
+// on it. Breakdown photos and insurance documents are all this endpoint is for.
+const OK_UPLOADS = /^(image\/(jpeg|png|webp|gif|heic|heif)|application\/pdf)$/i;
+const OK_EXT = /\.(jpe?g|png|webp|gif|heic|heif|pdf)$/i;
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (OK_UPLOADS.test(file.mimetype) && OK_EXT.test(file.originalname)) return cb(null, true);
+    cb(Object.assign(new Error('Only photos (JPG, PNG, WebP, HEIC) and PDFs can be uploaded'), { status: 400 }));
+  }
+});
 router.post('/upload', auth.requireAuth, upload.single('file'), (req, res) => {
   res.json({ url: '/uploads/' + req.file.filename });
 });
@@ -482,7 +494,7 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
 });
 
 router.post('/requests/:id/select', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET status='selected', selected_provider=$1
+  const r = await one(`UPDATE requests SET status='selected', selected_provider=$1, selected_at=NOW()
     WHERE id=$2 AND driver_id=$3 AND status='open' RETURNING *`,
     [req.body.provider_id, req.params.id, req.user.id]);
   if (!r) return res.status(400).json({ error: 'Request not open' });
@@ -848,16 +860,38 @@ async function jobFor(req, id, { techOnly = false } = {}) {
 router.get('/jobs', requireDispatch, async (req, res) => {
   const cid = companyIdOf(req.user);
   const rows = await q(`
-    SELECT ${JOB_COLS}, u.name AS driver_name, u.phone AS driver_phone,
-           t.name AS tech_name, t.phone AS tech_phone
+    SELECT ${JOB_COLS}, r.driver_id, u.name AS driver_name, u.phone AS driver_phone,
+           t.name AS tech_name, t.phone AS tech_phone,
+           dr.stars AS my_driver_rating
     FROM requests r
     JOIN users u ON u.id = r.driver_id
     LEFT JOIN users t ON t.id = r.assigned_tech
+    LEFT JOIN driver_ratings dr ON dr.request_id = r.id AND dr.provider_id = $1
     WHERE r.selected_provider = $1 AND r.status IN ('selected','completed')
     ORDER BY (r.completed_at IS NOT NULL), r.id DESC LIMIT 60`, [cid]);
   const techs = await q(`SELECT id, name, phone, member_role, member_location_id FROM users
     WHERE company_id=$1 AND assignable=TRUE AND archived_at IS NULL ORDER BY name`, [cid]);
   res.json({ jobs: rows, techs });
+});
+
+// The other half of the trust loop: every lead advertises the driver's rating
+// "as rated by providers" — this is where that rating actually comes from.
+router.post('/jobs/:id/rate-driver', requireDispatch, async (req, res) => {
+  const cid = companyIdOf(req.user);
+  const r = await one(`SELECT * FROM requests WHERE id=$1 AND selected_provider=$2`, [req.params.id, cid]);
+  if (!r) return res.status(404).json({ error: 'Not one of your jobs' });
+  if (!r.completed_at && r.status !== 'completed')
+    return res.status(400).json({ error: 'Rate the driver after the job is done' });
+  const stars = Math.max(1, Math.min(5, Number(req.body.stars) || 0));
+  try {
+    await q(`INSERT INTO driver_ratings (request_id, provider_id, driver_id, stars) VALUES ($1,$2,$3,$4)`,
+      [r.id, cid, r.driver_id, stars]);
+  } catch (e) {
+    return res.status(409).json({ error: 'You already rated this driver' });
+  }
+  await q(`UPDATE users SET rating_sum = rating_sum + $1, rating_count = rating_count + 1 WHERE id=$2`,
+    [stars, r.driver_id]);
+  res.json({ ok: true, stars });
 });
 
 router.post('/jobs/:id/assign', requireDispatch, async (req, res) => {
@@ -1558,3 +1592,77 @@ router.get('/admin/drivers/:id', auth.requireRole('admin'), async (req, res) => 
 
 module.exports = router;
 module.exports.sweepUnacceptedJobs = sweepUnacceptedJobs;
+
+/* ---------------- marketplace sweeps ----------------
+   Runs every minute alongside the job sweep. Three jobs:
+
+   1. SILENCE ALARM — a request with no buyers after 10 minutes pages the admin.
+      In the early months the admin IS the safety net: this is the text that says
+      "call a shop and make this happen".
+   2. STALL NUDGE — a company won the job but nobody is rolling 15 minutes later.
+      The dispatchers get a reminder text and the admin is copied.
+   3. AUTO-EXPIRY — unanswered requests close after 4 hours (with a warning text
+      to the driver at ~3.5h); answered-but-never-chosen close after 24. Stale
+      leads sitting in shop feeds teach shops the feed is junk — this keeps it
+      honest. Buyers of an expired lead keep chat access.               */
+async function sweepMarketplace() {
+  const adminPhone = auth.normalizePhone(process.env.ADMIN_PHONE || '');
+
+  // 1 — nobody bought, admin gets paged once
+  const silent = await q(`
+    UPDATE requests r SET silent_alerted = TRUE
+    WHERE r.status='open' AND r.silent_alerted = FALSE
+      AND r.created_at < NOW() - INTERVAL '10 minutes'
+      AND NOT EXISTS (SELECT 1 FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE)
+    RETURNING r.id, r.service_label, r.area_label, r.notified_count`);
+  if (adminPhone) for (const r of silent) {
+    await sms(null, adminPhone,
+      `RIGRX ALARM: Request #${r.id} (${r.service_label}, ${r.area_label}) has NO responders after 10 min. ` +
+      (r.notified_count ? `${r.notified_count} compan${r.notified_count===1?'y was':'ies were'} alerted — call one.` : `Nobody matched it at all.`));
+  }
+
+  // 2 — won it, not rolling
+  const stalled = await q(`
+    UPDATE requests r SET stall_alerted = TRUE
+    WHERE r.status='selected' AND r.stall_alerted = FALSE AND r.enroute_at IS NULL
+      AND r.selected_at IS NOT NULL AND r.selected_at < NOW() - INTERVAL '15 minutes'
+    RETURNING r.id, r.service_label, r.selected_provider`);
+  for (const r of stalled) {
+    const people = await alertRecipients(r.selected_provider, null);
+    for (const person of people)
+      await sms(person.id, person.phone,
+        `RIGRX: The driver on Request #${r.id} (${r.service_label}) chose you 15 minutes ago and nobody is on the way yet. Open the app and assign it.`);
+    if (adminPhone) await sms(null, adminPhone,
+      `RIGRX: Request #${r.id} was won 15 min ago but the company hasn't rolled anyone. They've been nudged.`);
+  }
+
+  // 3a — warn the driver before an unanswered request closes
+  const warn = await q(`
+    UPDATE requests r SET expire_warned = TRUE
+    WHERE r.status='open' AND r.expire_warned = FALSE
+      AND r.created_at < NOW() - INTERVAL '3 hours 30 minutes'
+      AND NOT EXISTS (SELECT 1 FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE)
+    RETURNING r.id, r.driver_id`);
+  for (const r of warn) {
+    const d = await one('SELECT id, phone, lang FROM users WHERE id=$1', [r.driver_id]);
+    if (d) await sms(d.id, d.phone, inLang(d,
+      `RIGRX: Your request #${r.id} closes in 30 minutes with no responses. Still stuck? Open the app and send it again — or widen your filters.`,
+      `RIGRX: Su solicitud #${r.id} se cierra en 30 minutos sin respuestas. ¿Sigue varado? Abra la app y envíela de nuevo — o amplíe sus filtros.`));
+  }
+
+  // 3b — expire: 4h with no buyers, 24h with buyers but no choice
+  const expired = await q(`
+    UPDATE requests r SET status='expired'
+    WHERE r.status='open' AND (
+      (r.created_at < NOW() - INTERVAL '4 hours'
+        AND NOT EXISTS (SELECT 1 FROM purchases pu WHERE pu.request_id=r.id AND pu.refunded=FALSE))
+      OR r.created_at < NOW() - INTERVAL '24 hours')
+    RETURNING r.id, r.driver_id`);
+  for (const r of expired) {
+    const d = await one('SELECT id, phone, lang FROM users WHERE id=$1', [r.driver_id]);
+    if (d) await sms(d.id, d.phone, inLang(d,
+      `RIGRX: Request #${r.id} was closed automatically. If you still need help, open the app and send a fresh one — it takes 30 seconds.`,
+      `RIGRX: La solicitud #${r.id} se cerró automáticamente. Si aún necesita ayuda, abra la app y envíe una nueva — toma 30 segundos.`));
+  }
+}
+module.exports.sweepMarketplace = sweepMarketplace;

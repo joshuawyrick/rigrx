@@ -1741,6 +1741,13 @@ async function vPJobs(){
         <button class="btn dark" style="width:auto; padding:11px 16px; font-size:13px" onclick="assignJob(${j.id})">
           ${j.assigned_tech ? 'Reassign' : 'Assign'}</button>
       </div>` : ''}
+      ${j.completed_at && !isTech() ? (j.my_driver_rating
+        ? `<div class="mini" style="margin-top:9px; color:var(--muted)">${ic('star',13)} You rated this driver ${j.my_driver_rating}★</div>`
+        : `<div class="row" style="margin-top:10px; flex-wrap:wrap; gap:8px">
+            <span class="mini k">Rate this driver</span>
+            <span class="stars" style="gap:5px">${[1,2,3,4,5].map(n=>`<svg class="ic fill" width="24" height="24" viewBox="0 0 24 24" style="cursor:pointer" onclick="rateDriver(${j.id},${n})">${PATHS.star}</svg>`).join('')}</span>
+            <span class="faint">Did they pay, show up, answer the phone? Other shops see this before buying their leads.</span>
+          </div>`) : ''}
     </div>`;
   };
   return `
@@ -1749,6 +1756,11 @@ async function vPJobs(){
   ${!d.techs.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} Nobody on your team can be assigned work yet. Add your techs in <a onclick="nav('p-people')">Your team</a>.</div></div>` : ''}
   ${live.length ? live.map(card).join('') : '<div class="card" style="text-align:center"><span class="muted">No live jobs. Buy a lead and win it and it lands here.</span></div>'}
   ${done.length ? `<div style="height:16px"></div><span class="sec">Completed (${done.length})</span>${done.map(card).join('')}` : ''}`;
+}
+async function rateDriver(id, stars){
+  await api('POST', `/jobs/${id}/rate-driver`, { stars });
+  toast(`Driver rated ${stars}★ — thanks, this keeps the feed honest`);
+  render();
 }
 async function assignJob(id){
   const techId = $('as-' + id)?.value;
