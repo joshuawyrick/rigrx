@@ -1,9 +1,10 @@
 // ============ Phone-code (OTP) authentication + sessions ============
 const crypto = require('crypto');
-const { q, one } = require('./db');
-const { sms, smsSimulated } = require('./notify');
+const { q, one, withTransaction } = require('./db');
+const { sms, wsRevokeUser, wsRevokeSession } = require('./notify');
+const { simulationEnabled, smsConfigured } = require('./config');
 
-const DEV_MODE = !process.env.TWILIO_ACCOUNT_SID; // without Twilio, the code is returned in the API response
+const DEV_MODE = simulationEnabled() && !smsConfigured();
 
 function normalizePhone(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
@@ -17,22 +18,15 @@ async function requestCode(phone) {
   // Rate limits, because with Twilio live every code is a text that costs money:
   // at most 5 codes per phone per hour, and no new code within 30 seconds of the
   // last (stops double-taps and scripts without ever locking out a real person).
-  // In simulation mode (no Twilio keys) codes are free and shown on screen, so the
-  // anti-fraud ceiling would only brick testing. Real texts keep the tight limits.
-  const simulated = smsSimulated();
-  const maxPerHour = simulated ? 100 : 5;
-  const minGapMs = simulated ? 3 * 1000 : 30 * 1000;
   const recent = await one(
     `SELECT COUNT(*)::int AS n, MAX(created_at) AS last FROM otp_codes
      WHERE phone=$1 AND created_at > NOW() - INTERVAL '1 hour'`, [phone]);
-  if (recent.n >= maxPerHour) {
+  if (recent.n >= (DEV_MODE ? 100 : 5)) {
     const err = new Error('Too many codes requested for this number. Try again in an hour, or call RIGRX if you are stuck.');
     err.status = 429; throw err;
   }
-  if (recent.last && Date.now() - new Date(recent.last).getTime() < minGapMs) {
-    const err = new Error(simulated
-      ? 'One moment — give it a few seconds between codes.'
-      : 'We just sent a code — give it 30 seconds to arrive before requesting another.');
+  if (recent.last && Date.now() - new Date(recent.last).getTime() < (DEV_MODE ? 3 : 30) * 1000) {
+    const err = new Error('We just sent a code — give it 30 seconds to arrive before requesting another.');
     err.status = 429; throw err;
   }
   const code = String(crypto.randomInt(100000, 999999));
@@ -70,23 +64,48 @@ async function verifyCode(phone, code) {
 }
 
 async function findOrCreateUser(phone, role) {
-  let user = await one('SELECT * FROM users WHERE phone=$1', [phone]);
-  if (!user) {
+  return await withTransaction(async client => {
+    let user = (await client.query(
+      'SELECT * FROM users WHERE phone=$1 FOR NO KEY UPDATE', [phone])).rows[0];
+    if (!user) {
     const isAdmin = phone === normalizePhone(process.env.ADMIN_PHONE || '');
-    user = await one(
-      'INSERT INTO users (phone, role) VALUES ($1,$2) RETURNING *',
-      [phone, isAdmin ? 'admin' : (role === 'provider' ? 'provider' : 'driver')]);
-    if (user.role === 'provider') {
-      await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [user.id]);
+      const accountRole = isAdmin ? 'admin' : (role === 'provider' ? 'provider' : 'driver');
+      user = (await client.query(`
+        INSERT INTO users (phone, role, member_role)
+        VALUES ($1,$2,$3)
+        ON CONFLICT (phone) DO NOTHING
+        RETURNING *`,
+        [phone, accountRole, accountRole === 'provider' ? 'owner' : ''])).rows[0];
+      if (!user)
+        user = (await client.query(
+          'SELECT * FROM users WHERE phone=$1 FOR NO KEY UPDATE', [phone])).rows[0];
     }
-  }
-  return user;
+    if (user.role === 'provider') {
+      if (['', 'owner'].includes(user.member_role || '')
+          && (!user.company_id || user.company_id === user.id)
+          && ((user.member_role || '') !== 'owner' || user.company_id !== user.id)) {
+        user = (await client.query(`
+          UPDATE users SET member_role='owner', company_id=id
+          WHERE id=$1 RETURNING *`, [user.id])).rows[0];
+      }
+      await client.query(
+        'INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [user.id]);
+    }
+    return user;
+  });
 }
 
 // Archiving takes effect immediately: every live session for that account is dropped,
 // so someone already signed in is out on their next request rather than at expiry.
 async function endAllSessions(userId) {
   await q('DELETE FROM sessions WHERE user_id=$1', [userId]);
+  wsRevokeUser(userId);
+}
+
+async function endSession(token) {
+  if (!token) return;
+  await q('DELETE FROM sessions WHERE token=$1', [token]);
+  wsRevokeSession(token);
 }
 
 async function createSession(userId) {
@@ -103,7 +122,9 @@ async function attachUser(req, res, next) {
     if (token) {
       req.user = await one(
         `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.token=$1 AND s.expires_at > NOW() AND u.archived_at IS NULL`, [token]);
+         LEFT JOIN users company ON company.id = u.company_id
+         WHERE s.token=$1 AND s.expires_at > NOW() AND u.archived_at IS NULL
+           AND (u.role <> 'provider' OR company.archived_at IS NULL)`, [token]);
     }
   } catch (e) { /* ignore */ }
   next();
@@ -121,4 +142,16 @@ function requireRole(role) {
   };
 }
 
-module.exports = { normalizePhone, requestCode, verifyCode, findOrCreateUser, createSession, endAllSessions, attachUser, requireAuth, requireRole, DEV_MODE };
+module.exports = {
+  normalizePhone,
+  requestCode,
+  verifyCode,
+  findOrCreateUser,
+  createSession,
+  endSession,
+  endAllSessions,
+  attachUser,
+  requireAuth,
+  requireRole,
+  DEV_MODE
+};

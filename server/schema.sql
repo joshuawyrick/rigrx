@@ -274,6 +274,7 @@ CREATE TABLE IF NOT EXISTS waitlist (
 -- companies paid for and quietly rewrite the revenue history.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS archived_by_company BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS idx_users_archived ON users(archived_at);
 
 -- ---- company people (owner / dispatcher / tech) ----
@@ -349,15 +350,90 @@ ALTER TABLE providers ADD COLUMN IF NOT EXISTS spanish_dispatch BOOLEAN NOT NULL
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS lead_credits INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS paid_with TEXT NOT NULL DEFAULT 'card';  -- card | credit
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS list_price_cents INTEGER;                -- what it WOULD have cost
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'succeeded'; -- pending | succeeded | failed
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS payment_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS payment_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS refund_status TEXT NOT NULL DEFAULT 'none'; -- none | pending | succeeded | failed
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS refund_idempotency_key TEXT;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS stripe_refund TEXT;
+UPDATE purchases SET refund_status='succeeded'
+  WHERE refunded=TRUE AND refund_status='none';
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM purchases
+    WHERE refunded=FALSE AND status IN ('pending','succeeded')
+    GROUP BY request_id HAVING COUNT(*) > 4
+  ) THEN
+    RAISE EXCEPTION 'Cannot secure purchase slots: a legacy request has more than four active purchases';
+  END IF;
+END $$;
+WITH problematic_requests AS (
+  SELECT request_id
+  FROM purchases
+  WHERE refunded=FALSE AND status IN ('pending','succeeded')
+  GROUP BY request_id
+  HAVING COUNT(*) <> COUNT(DISTINCT slot)
+     OR MIN(slot) < 1 OR MAX(slot) > 4
+), ranked AS (
+  SELECT p.id,
+         ROW_NUMBER() OVER (
+           PARTITION BY p.request_id
+           ORDER BY p.premium ASC, p.created_at ASC, p.id ASC
+         ) AS safe_slot
+  FROM purchases p
+  JOIN problematic_requests bad ON bad.request_id=p.request_id
+  WHERE p.refunded=FALSE AND p.status IN ('pending','succeeded')
+)
+UPDATE purchases p SET slot=ranked.safe_slot
+FROM ranked WHERE p.id=ranked.id;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_purchases_active_slot
+  ON purchases(request_id, slot) WHERE refunded=FALSE AND status IN ('pending','succeeded');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_purchases_idempotency
+  ON purchases(idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_purchases_refund_idempotency
+  ON purchases(refund_idempotency_key) WHERE refund_idempotency_key IS NOT NULL;
+DO $$
+BEGIN
+  ALTER TABLE purchases ADD CONSTRAINT purchases_slot_range CHECK (slot BETWEEN 1 AND 4);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$
+BEGIN
+  ALTER TABLE purchases ADD CONSTRAINT purchases_amount_nonnegative CHECK (amount_cents >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$
+BEGIN
+  ALTER TABLE purchases ADD CONSTRAINT purchases_payment_kind CHECK (paid_with IN ('card','credit'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$
+BEGIN
+  ALTER TABLE purchases ADD CONSTRAINT purchases_status_valid CHECK (status IN ('pending','succeeded','failed'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$
+BEGIN
+  ALTER TABLE purchases ADD CONSTRAINT purchases_refund_status_valid
+    CHECK (refund_status IN ('none','pending','succeeded','failed'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 CREATE TABLE IF NOT EXISTS credit_log (
   id          SERIAL PRIMARY KEY,
   provider_id INTEGER NOT NULL REFERENCES providers(user_id) ON DELETE CASCADE,
   delta       INTEGER NOT NULL,               -- +10 granted, -1 spent, +1 refund
   reason      TEXT NOT NULL DEFAULT '',       -- 'beta welcome' | 'spent on lead #12' | ...
   by_admin    BOOLEAN NOT NULL DEFAULT FALSE,
+  event_key   TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_credit_log_provider ON credit_log(provider_id);
+ALTER TABLE credit_log ADD COLUMN IF NOT EXISTS event_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credit_log_event ON credit_log(event_key) WHERE event_key IS NOT NULL;
 
 -- ---- stripe customer ----
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS stripe_customer TEXT NOT NULL DEFAULT '';
@@ -385,6 +461,182 @@ ALTER TABLE requests ADD COLUMN IF NOT EXISTS selected_at    TIMESTAMPTZ;
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS silent_alerted BOOLEAN NOT NULL DEFAULT FALSE;  -- admin was texted: nobody bought
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS stall_alerted  BOOLEAN NOT NULL DEFAULT FALSE;  -- company was nudged: won it, hasn't moved
 ALTER TABLE requests ADD COLUMN IF NOT EXISTS expire_warned  BOOLEAN NOT NULL DEFAULT FALSE;  -- driver was warned before auto-close
+-- Dispatch is an explicit state machine. assignment_version fences a technician's
+-- delayed tap against a later reassignment, including reassignment back to that same person.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS job_state TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS assignment_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS assignment_bounces INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS bounced_at TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS declined_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS decline_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS job_activity_at TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS rescue_requested_at TIMESTAMPTZ;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS rescue_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS rescue_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS silent_alert_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS stall_alert_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS late_update_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS selection_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS reopen_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ;
+-- A manual city is deliberately distinguishable from live GPS so everyone knows to
+-- rely on the driver's landmark or mile marker for the final approach.
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS location_source TEXT NOT NULL DEFAULT 'device';
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS location_captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS location_accuracy_m DOUBLE PRECISION;
+UPDATE requests SET job_state = CASE
+  WHEN status='completed' OR completed_at IS NOT NULL THEN 'completed'
+  WHEN status<>'selected' THEN 'none'
+  WHEN arrived_at IS NOT NULL THEN 'arrived'
+  WHEN enroute_at IS NOT NULL THEN 'enroute'
+  WHEN accepted_at IS NOT NULL THEN 'accepted'
+  WHEN assigned_tech IS NOT NULL THEN 'assigned'
+  ELSE 'unassigned'
+END
+WHERE job_state='none' AND (status='selected' OR completed_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_requests_job_state ON requests(status, job_state, job_activity_at);
+DO $$
+BEGIN
+  ALTER TABLE requests ADD CONSTRAINT requests_job_state_valid
+    CHECK (job_state IN ('none','unassigned','assigned','accepted','enroute','arrived','completed'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$
+BEGIN
+  ALTER TABLE requests ADD CONSTRAINT requests_location_source_valid
+    CHECK (location_source IN ('device','manual'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS job_events (
+  id                 BIGSERIAL PRIMARY KEY,
+  request_id         INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  event_type         TEXT NOT NULL,
+  from_state         TEXT NOT NULL DEFAULT '',
+  to_state           TEXT NOT NULL DEFAULT '',
+  actor_id           INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assigned_tech      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assignment_version INTEGER NOT NULL DEFAULT 0,
+  detail             JSONB NOT NULL DEFAULT '{}',
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_job_events_request ON job_events(request_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS dispatch_commands (
+  id BIGSERIAL PRIMARY KEY,
+  command_key TEXT NOT NULL UNIQUE,
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  actor_id INTEGER NOT NULL REFERENCES users(id),
+  command_type TEXT NOT NULL,
+  expected_assignment_version INTEGER NOT NULL,
+  result_assignment_version INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_commands_request
+  ON dispatch_commands(request_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS lead_eligibility (
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  provider_id INTEGER NOT NULL REFERENCES providers(user_id) ON DELETE CASCADE,
+  location_id INTEGER REFERENCES provider_locations(id) ON DELETE SET NULL,
+  distance_mi NUMERIC NOT NULL,
+  match_identity TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (request_id, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lead_eligibility_provider
+  ON lead_eligibility(provider_id, request_id);
+
+CREATE TABLE IF NOT EXISTS dispatch_exceptions (
+  id          BIGSERIAL PRIMARY KEY,
+  request_id  INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  type        TEXT NOT NULL,
+  provider_id INTEGER REFERENCES providers(user_id) ON DELETE SET NULL,
+  tech_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status      TEXT NOT NULL DEFAULT 'open',
+  detail      JSONB NOT NULL DEFAULT '{}',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ,
+  resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolution  TEXT NOT NULL DEFAULT ''
+);
+ALTER TABLE dispatch_exceptions ADD COLUMN IF NOT EXISTS occurrence INTEGER NOT NULL DEFAULT 1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatch_exception_open
+  ON dispatch_exceptions(request_id, type) WHERE status IN ('open','acknowledged');
+CREATE INDEX IF NOT EXISTS idx_dispatch_exceptions_queue
+  ON dispatch_exceptions(status, created_at DESC);
+
+-- Older releases let owner/dispatcher accounts receive jobs. Pre-arrival work
+-- returns to dispatch because those accounts cannot use technician actions now.
+-- Arrived work stays on scene and the driver can complete it; treating it as an
+-- ordinary unassigned job would risk dispatching a second technician.
+INSERT INTO job_events
+  (request_id,event_type,from_state,to_state,actor_id,assignment_version,detail)
+SELECT r.id, 'legacy_assignment_recovered', r.job_state, 'unassigned', NULL,
+  r.assignment_version + 1,
+  jsonb_build_object('previous_tech_id', r.assigned_tech, 'migration', TRUE)
+FROM requests r
+WHERE r.status='selected' AND r.job_state IN ('assigned','accepted','enroute')
+  AND NOT EXISTS (
+    SELECT 1 FROM users tech
+    WHERE tech.id=r.assigned_tech AND tech.archived_at IS NULL
+      AND tech.member_role IN ('tech','owner','dispatcher') AND tech.assignable=TRUE
+      AND tech.company_id=r.selected_provider
+  );
+
+WITH recovered AS (
+  UPDATE requests r SET job_state='unassigned', assigned_tech=NULL,
+    assigned_at=NULL, accepted_at=NULL, enroute_at=NULL, arrived_at=NULL,
+    eta_minutes=NULL, eta_set_at=NULL, assignment_version=assignment_version+1,
+    assignment_bounces=assignment_bounces+1, assign_bounced=TRUE,
+    bounced_at=NOW(), decline_reason='Legacy assignment required recovery',
+    job_activity_at=NOW(), stall_alerted=FALSE
+  WHERE r.status='selected' AND r.job_state IN ('assigned','accepted','enroute')
+    AND NOT EXISTS (
+      SELECT 1 FROM users tech
+      WHERE tech.id=r.assigned_tech AND tech.archived_at IS NULL
+        AND tech.member_role IN ('tech','owner','dispatcher') AND tech.assignable=TRUE
+        AND tech.company_id=r.selected_provider
+    )
+  RETURNING r.id, r.selected_provider
+)
+INSERT INTO dispatch_exceptions
+  (request_id,type,provider_id,status,detail)
+SELECT id, 'assignment_bounced', selected_provider, 'open',
+  jsonb_build_object('reason','legacy_assignment_recovered')
+FROM recovered
+ON CONFLICT (request_id,type) WHERE status IN ('open','acknowledged')
+DO UPDATE SET status='open', provider_id=EXCLUDED.provider_id,
+  detail=EXCLUDED.detail, occurrence=dispatch_exceptions.occurrence+1,
+  updated_at=NOW();
+
+-- notifications_log is also the durable delivery outbox. Legacy rows represent
+-- already-recorded sends; new rows move pending -> sending -> sent/dead with retries.
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS phone TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS request_id INTEGER REFERENCES requests(id) ON DELETE SET NULL;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'sent';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS claim_token TEXT;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS provider_message_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+ALTER TABLE notifications_log ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notifications_dedupe
+  ON notifications_log(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_notifications_delivery
+  ON notifications_log(status, available_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_request
+  ON notifications_log(request_id, created_at DESC);
+ALTER TABLE notifications_log DROP CONSTRAINT IF EXISTS notifications_status_valid;
+ALTER TABLE notifications_log ADD CONSTRAINT notifications_status_valid
+  CHECK (status IN ('pending','sending','sent','dead','superseded'));
 
 -- Shops rating drivers: one rating per company per job. Rolls up onto the
 -- driver's rating shown on every lead ('as rated by providers').
@@ -397,3 +649,14 @@ CREATE TABLE IF NOT EXISTS driver_ratings (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (request_id, provider_id)
 );
+
+-- Uploads are private application data. Files are served only after the API verifies
+-- the signed-in user's relationship to the owner, request, or provider dossier.
+CREATE TABLE IF NOT EXISTS uploads (
+  file_name     TEXT PRIMARY KEY,
+  owner_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mime_type     TEXT NOT NULL,
+  original_name TEXT NOT NULL DEFAULT '',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_uploads_owner ON uploads(owner_id);

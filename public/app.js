@@ -5,9 +5,16 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 const fmt$ = cents => '$' + (cents / 100).toFixed(0);
 const fmtEta = v => { const t = String(v ?? '').trim(); return /^\d+$/.test(t) ? t + ' min' : t; };
-function toast(msg){
-  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+function toast(msg, persist = false, translate = true){
+  const translated = translate ? T(msg) : String(msg);
+  const t = $('toast'); t.textContent = translated; t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite'); t.classList.add('show');
+  if (persist || /saved|complete|failed|error|offline|refund|cancelled|unlocked|approved|rejected/i.test(String(msg))) persistentNotice(translated);
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 3000);
+}
+function persistentNotice(msg){
+  let n = $('persistentNotice');
+  if (!n) { n = document.createElement('div'); n.id = 'persistentNotice'; n.className = 'noticebar'; n.setAttribute('role','status'); n.setAttribute('aria-live','polite'); document.body.prepend(n); }
+  n.innerHTML = `<span>${esc(msg)}</span><button type="button" aria-label="${T('Dismiss notice')}" onclick="this.parentElement.remove()">${T('Dismiss')}</button>`;
 }
 function timeAgo(ts){
   const m = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
@@ -17,36 +24,55 @@ function timeAgo(ts){
   return h < 24 ? T('{n} hr ago', { n: h }) : T('{n} d ago', { n: Math.round(h / 24) });
 }
 async function api(method, url, body, _retried){
-  let res;
+  const actionButton = method !== 'GET' ? document.activeElement?.closest?.('button') : null;
+  if (actionButton) {
+    actionButton.disabled = true;
+    actionButton.setAttribute('aria-busy', 'true');
+  }
   try {
-    res = await fetch('/api' + url, {
+    if (!navigator.onLine) {
+      showOfflineNotice(true);
+      throw new Error(T('You are offline. Reconnect and try again.'));
+    }
+    let res;
+    try { res = await fetch('/api' + url, {
       method, headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined
-    });
-  } catch (e) {
-    // Phones kill connections when Safari is backgrounded; one quiet retry
-    // turns most "Couldn't load this page" moments into a normal load.
-    if (method === 'GET' && !_retried) {
-      await new Promise(r => setTimeout(r, 600));
-      return api(method, url, body, true);
+    }); } catch (e) {
+      // Phones kill connections when Safari is backgrounded; one quiet retry
+      // turns most "connection lost" moments into a normal load.
+      if (method === 'GET' && !_retried) {
+        await new Promise(resolve => setTimeout(resolve, 600));
+        return await api(method, url, body, true);
+      }
+      showOfflineNotice(true);
+      throw new Error(T('Connection lost. Reconnect and try again.'));
     }
-    throw e;
+    const data = await res.json().catch(()=>({}));
+    if (res.status === 401 && S.me) {
+      // The session ended (signed out elsewhere, or expired). Never leave a dead
+      // dashboard on screen with a misleading toast — go to a clean sign-in.
+      S.me = null; S.provider = null;
+      toast(T('You were signed out — sign in again'), true);
+      nav('signin');
+      const gone = new Error('signed out'); gone.status = 401; throw gone;
+    }
+    if (!res.ok) {
+      const message = T(data.error || 'Request failed');
+      toast(message, true);
+      const error = new Error(message || res.status);
+      error.status = res.status;
+      if (res.status === 409) setTimeout(refreshAuthoritativeView, 0);
+      throw error;
+    }
+    return data;
+  } finally {
+    if (actionButton?.isConnected) {
+      actionButton.disabled = false;
+      actionButton.removeAttribute('aria-busy');
+    }
   }
-  const data = await res.json().catch(()=>({}));
-  if (res.status === 401 && S.me) {
-    // The session ended (signed out in another tab, or expired). Never leave a
-    // dead dashboard on screen with a misleading toast — go to a clean sign-in.
-    S.me = null; S.provider = null;
-    toast(T('You were signed out — sign in again'));
-    nav('signin');
-    throw new Error('signed out');
-  }
-  if (!res.ok) { toast(data.error || T('Request failed')); throw new Error(data.error || res.status); }
-  return data;
 }
-// A tab that wakes from the background may be painted as an account that is no
-// longer the one signed in (the other tab switched or signed out). Re-check and
-// repaint rather than letting someone act on a stale screen.
 let lastWakeCheck = 0;
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || !S.me) return;
@@ -55,14 +81,20 @@ document.addEventListener('visibilitychange', async () => {
   try {
     const d = await api('GET', '/me');
     if (d.user && d.user.id !== S.me.id) { await loadMe(); connectWS(); nav(homeFor()); }
-  } catch (e) {} // 401 already handled inside api()
+  } catch (e) {} // a 401 is already handled inside api()
 });
-function tog(el){ el.classList.toggle('sel'); }
-function togOne(el){ [...el.parentElement.children].forEach(c=>c.classList.remove('sel')); el.classList.add('sel'); }
+function syncPressed(el){ if (el?.matches?.('.chip,.dutycard')) el.setAttribute('aria-pressed', el.classList.contains('sel') ? 'true' : 'false'); }
+function tog(el){ el.classList.toggle('sel'); syncPressed(el); }
+function togOne(el){
+  [...el.parentElement.children].forEach(c=>{ c.classList.remove('sel'); syncPressed(c); });
+  el.classList.add('sel'); syncPressed(el);
+}
 function selOf(groupId){ const g = $(groupId); return g ? [...g.querySelectorAll('.chip.sel')].map(chipVal) : []; }
 // A translated chip shows Spanish but stores English, so the data the providers
 // and the matching engine see never depends on the driver's language.
-function chipVal(c){ return c.dataset.en || c.textContent.trim(); }
+function chipVal(c){
+  return RIGRXFormProgress.canonicalChipValue(c.dataset, c.textContent);
+}
 const qv = id => { const el = $(id); return el ? el.value : ''; };
 
 /* ---------------- state & router ---------------- */
@@ -77,12 +109,270 @@ const S = {
 function toggleLang(){
   S.langTouched = true;
   setLang(getLang() === 'es' ? 'en' : 'es');
+  document.documentElement.lang = getLang();
   if (S.me) api('PUT', '/me/lang', { lang: getLang() }).catch(()=>{});
   render();
 }
 // One tap on the sign-in screen; also lives in the sidebar/topbar for drivers.
 function langToggle(){
-  return `<div style="text-align:center; margin-top:14px"><a onclick="toggleLang()" style="font-size:13px">${getLang() === 'es' ? 'View in English' : 'Ver en español'}</a></div>`;
+  return `<div style="text-align:center; margin-top:14px"><button class="plain-link" onclick="toggleLang()" style="font-size:13px">${getLang() === 'es' ? 'View in English' : 'Ver en español'}</button></div>`;
+}
+
+function showOfflineNotice(show){
+  let n = $('offlineNotice');
+  if (!n) {
+    n = document.createElement('div'); n.id = 'offlineNotice'; n.className = 'noticebar';
+    n.setAttribute('role', 'alert'); n.innerHTML = `<span>${T('You are offline. Your entered details stay on this device.')}</span><button type="button" onclick="location.reload()">${T('Reconnect')}</button>`;
+    document.body.prepend(n);
+  }
+  n.hidden = !show;
+}
+window.addEventListener('offline', () => showOfflineNotice(true));
+window.addEventListener('online', () => { showOfflineNotice(false); toast(T('Back online — updates are connected')); refreshAuthoritativeView(); });
+
+function makeControlsAccessible(root){
+  const selectors = [
+    'a:not([href])[onclick]', 'span.chip[onclick]', 'div.dutycard[onclick]',
+    'div.svc[onclick]', 'div.tile.click[onclick]', 'div.card.click[onclick]',
+    'div.lead[onclick]', 'div.logo.click[onclick]', 'div.slogo.click[onclick]'
+  ].join(',');
+  root.querySelectorAll(selectors).forEach(el => {
+    if (el.querySelector('a[href],button,input,select,textarea,[onclick]')) return;
+    const button = document.createElement('button');
+    [...el.attributes].forEach(attr => {
+      if (!['role', 'tabindex'].includes(attr.name)) button.setAttribute(attr.name, attr.value);
+    });
+    button.type = 'button';
+    if (el.tagName === 'A') button.classList.add('plain-link');
+    button.innerHTML = el.innerHTML;
+    el.replaceWith(button);
+  });
+  root.querySelectorAll('[onclick]').forEach(el => {
+    if (el.matches('button,input,select,textarea')) return;
+    if (el.querySelector('a[href],button,input,select,textarea,[onclick]')) return;
+    if (el.tagName === 'A' && !el.getAttribute('href')) {
+      el.setAttribute('role', 'button'); el.setAttribute('tabindex', '0');
+    } else if (!el.matches('a')) {
+      el.setAttribute('role', 'button'); el.setAttribute('tabindex', '0');
+    }
+    if (!el.onkeydown) el.onkeydown = e => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target === el) { e.preventDefault(); el.click(); }
+    };
+  });
+  root.querySelectorAll('input:not([id])').forEach((input, i) => { input.id = `field-${renderSeq}-${i}`; });
+  root.querySelectorAll('label.f').forEach(label => {
+    const next = label.nextElementSibling;
+    if (next && /^(INPUT|SELECT|TEXTAREA)$/.test(next.tagName) && !label.htmlFor) label.htmlFor = next.id;
+    if (next?.matches('.chips,.dutyrow')) {
+      if (!label.id) label.id = `group-label-${renderSeq}-${Math.random().toString(36).slice(2, 7)}`;
+      next.setAttribute('role', 'group');
+      next.setAttribute('aria-labelledby', label.id);
+    }
+  });
+  root.querySelectorAll('.chip,.dutycard').forEach(syncPressed);
+  root.querySelectorAll('.modal').forEach((modal, i) => {
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    const heading = modal.querySelector('h1,h2,h3');
+    if (heading) {
+      if (!heading.id) heading.id = `dialog-title-${renderSeq}-${i}`;
+      modal.setAttribute('aria-labelledby', heading.id);
+    }
+  });
+}
+
+/* Non-sensitive progress survives a dropped signal, an accidental refresh, or a long
+   dispatch shift. OTP and payment fields are deliberately never persisted. */
+function formProgressContext(view){
+  const account = S.me?.id ? `u${S.me.id}` : 'guest';
+  let entity = 'main';
+  if ((view === 'd-chat' || view === 'p-chat') && S.chatKey) entity = `${S.chatKey.r}-${S.chatKey.p}`;
+  else if (view === 'd-setup2') entity = S.editTruck?.id ? `truck-${S.editTruck.id}` : 'truck-new';
+  else if (view === 'd-setup3') entity = S.editTrailer?.id ? `trailer-${S.editTrailer.id}` : 'trailer-new';
+  else if (view === 'd-rate') entity = `request-${S.rateRequestId || 'new'}`;
+  else if (view === 'p-lead') entity = `lead-${S.leadId || 'new'}`;
+  else if (view === 'a-provider') entity = `provider-${S.adminProviderId || 'new'}`;
+  return `${account}_${view}_${entity}`;
+}
+function formProgressKey(view){ return `rigrx_form_${formProgressContext(view)}`; }
+function clearFormProgressKey(key){ try { sessionStorage.removeItem(key); } catch(e){} }
+function clearFormProgress(view){ clearFormProgressKey(formProgressKey(view)); }
+function readFormProgressKey(key){
+  try { return JSON.parse(sessionStorage.getItem(key) || 'null'); }
+  catch(e){ return null; }
+}
+function clearCommittedProgressFields(key, fields, revision){
+  const result = RIGRXFormProgress.clearCommittedFields(readFormProgressKey(key), fields, revision);
+  if (!result.changed) return false;
+  const remaining = Object.keys(result.progress || {}).filter(field => field !== '__revision');
+  try {
+    if (remaining.length) sessionStorage.setItem(key, JSON.stringify(result.progress));
+    else sessionStorage.removeItem(key);
+  } catch(e){}
+  return true;
+}
+function clearAllFormProgress(userId = S.me?.id){
+  if (!userId) return;
+  const prefix = `rigrx_form_u${userId}_`;
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const key = sessionStorage.key(i);
+      if (key?.startsWith(prefix)) sessionStorage.removeItem(key);
+    }
+  } catch(e){}
+}
+function clearRequestProgress(){
+  ['d-request','d-details','d-location','d-review'].forEach(clearFormProgress);
+}
+function readFormProgress(view = S.view){
+  return readFormProgressKey(formProgressKey(view));
+}
+function progressFieldId(key){
+  if (key.startsWith('__chips_')) return key.slice(8);
+  if (key.startsWith('__city_')) return key.slice(7);
+  if (key.startsWith('__uploads_')) return key.slice('__uploads_'.length);
+  return key;
+}
+function formEntityFingerprint(view = S.view){
+  let entity = null;
+  if (view === 'd-setup2' && S.editTruck?.id) entity = S.editTruck;
+  else if (view === 'd-setup3' && S.editTrailer?.id) entity = S.editTrailer;
+  else if (view.startsWith('p-setup')) entity = RIGRXFormProgress.providerDraftEntity(view, S.provider);
+  else if (view === 'a-provider' && S.adminProviderSnapshot) entity = {
+    user_id: S.adminProviderSnapshot.user_id, admin_notes: S.adminProviderSnapshot.admin_notes
+  };
+  return entity ? RIGRXFormProgress.stableFingerprint(entity) : '';
+}
+function ensureFormProgressCurrent(view = S.view){
+  const key = formProgressKey(view);
+  const data = readFormProgressKey(key);
+  const fingerprint = formEntityFingerprint(view);
+  if (RIGRXFormProgress.isEntityDraftCurrent(data, fingerprint)) return true;
+  clearFormProgressKey(key);
+  persistentNotice(T('Saved changes were not restored because this information was updated elsewhere.'));
+  return false;
+}
+function updateFormProgress(changes = {}, removals = [], view = S.view){
+  const allowedChanges = Object.entries(changes)
+    .filter(([key]) => RIGRXFormProgress.isProgressFieldAllowed(view, progressFieldId(key)));
+  const allowedRemovals = removals
+    .filter(key => RIGRXFormProgress.isProgressFieldAllowed(view, progressFieldId(key)));
+  if (!allowedChanges.length && !allowedRemovals.length) return 0;
+
+  const key = formProgressKey(view);
+  const data = { ...(readFormProgressKey(key) || {}) };
+  const fingerprint = formEntityFingerprint(view);
+  if (fingerprint && !data.__entityFingerprint) data.__entityFingerprint = fingerprint;
+  allowedChanges.forEach(([field, value]) => { data[field] = value; });
+  allowedRemovals.forEach(field => { delete data[field]; });
+  data.__revision = Number(data.__revision || 0) + 1;
+  try { sessionStorage.setItem(key, JSON.stringify(data)); } catch(e){}
+  return data.__revision;
+}
+function saveFormField(el){
+  if (!el?.id || /code|card|payment|stripe/i.test(el.id) || ['file','password'].includes(el.type)) return;
+  const value = el.type === 'checkbox' ? el.checked : el.value;
+  const removals = el.tagName === 'SELECT' && value !== '__other' ? [`${el.id}-other`] : [];
+  updateFormProgress({ [el.id]: value }, removals);
+}
+function saveFormSelection(group){
+  if (!group?.id) return;
+  updateFormProgress({
+    [`__chips_${group.id}`]: [...group.querySelectorAll('.chip.sel,.dutycard.sel')].map(chipVal)
+  });
+}
+function restoreFormProgress(){
+  if (!ensureFormProgressCurrent()) return;
+  const data = readFormProgress();
+  if (!data) return;
+  Object.entries(data).forEach(([key, value]) => {
+    if (!key.startsWith('__city_')) return;
+    const id = key.slice(7);
+    if (!RIGRXFormProgress.isProgressFieldAllowed(S.view, id)) return;
+    const city = RIGRXFormProgress.normalizeCitySelection(value);
+    if (city) {
+      S.pickedCity = S.pickedCity || {};
+      S.pickedCity[id] = city;
+    }
+  });
+  if (S.view === 'd-details') {
+    const uploadDraft = data['__uploads_rq-photo'];
+    const photos = RIGRXFormProgress.uploadedReferencesForService(uploadDraft, S.draft.service_key);
+    if (photos.length) S.draft.photos = photos;
+  }
+  Object.entries(data).forEach(([key,value]) => {
+    const fieldId = progressFieldId(key);
+    if (!RIGRXFormProgress.isProgressFieldAllowed(S.view, fieldId)) return;
+    if (key.startsWith('__city_') || key.startsWith('__uploads_') || key === '__entityFingerprint') return;
+    if (key.startsWith('__chips_')) {
+      const group = $(key.slice(8)); if (!group) return;
+      group.querySelectorAll('.chip,.dutycard').forEach(el => {
+        el.classList.toggle('sel', value.includes(chipVal(el)));
+        syncPressed(el);
+      });
+      return;
+    }
+    const el = $(key); if (el) el.type === 'checkbox' ? el.checked = value : el.value = value;
+  });
+  document.querySelectorAll('#root select[id]').forEach(select => {
+    const input = $(`${select.id}-other`);
+    if (input) RIGRXFormProgress.syncOtherControl(select, input);
+  });
+}
+function firstInvalid(fields){
+  document.querySelectorAll('#root .field-error').forEach(el => el.remove());
+  document.querySelectorAll('#root [aria-invalid="true"]').forEach(el => {
+    el.removeAttribute('aria-invalid');
+    const describedBy = (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(x => !x.endsWith('-error'));
+    if (describedBy.length) el.setAttribute('aria-describedby', describedBy.join(' '));
+    else el.removeAttribute('aria-describedby');
+  });
+  const bad = fields.find(([id, ok]) => !ok);
+  if (!bad) return false;
+  const message = T(bad[2] || 'Check the highlighted field');
+  const el = $(bad[0]);
+  if (el) {
+    const error = document.createElement('span');
+    error.className = 'field-error';
+    error.id = `${el.id}-error`;
+    error.setAttribute('role', 'alert');
+    error.textContent = message;
+    el.setAttribute('aria-invalid','true');
+    el.setAttribute('aria-describedby', [el.getAttribute('aria-describedby'), error.id].filter(Boolean).join(' '));
+    el.insertAdjacentElement('afterend', error);
+    el.focus();
+  }
+  toast(message);
+  return true;
+}
+document.addEventListener('input', e => {
+  if (!e.target.closest('#root')) return;
+  e.target.removeAttribute?.('aria-invalid');
+  const error = e.target.id ? $(`${e.target.id}-error`) : null;
+  if (error) error.remove();
+  saveFormField(e.target);
+}, true);
+document.addEventListener('change', e => { if (e.target.closest('#root')) saveFormField(e.target); }, true);
+document.addEventListener('click', e => {
+  const choice = e.target.closest('#root .chip,#root .dutycard');
+  const group = choice?.closest('.chips[id],.dutyrow[id]');
+  if (group) setTimeout(() => {
+    if (RIGRXFormProgress.shouldPersistSelection(group)) saveFormSelection(group);
+  }, 0);
+}, true);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('confirmWrap')) closeConfirm();
+});
+
+function localizeVisible(root){
+  root.querySelectorAll('[data-i18n]').forEach(el => {
+    if (el.dataset.i18n) el.textContent = T(el.dataset.i18n);
+  });
+  root.querySelectorAll('[placeholder],[title],[aria-label]').forEach(el => {
+    ['placeholder','title','aria-label'].forEach(attr => {
+      if (el.hasAttribute(attr)) el.setAttribute(attr, T(el.getAttribute(attr)));
+    });
+  });
 }
 async function loadCatalog(){
   try { S.catalog = await api('GET', '/catalog'); } catch(e){ S.catalog = []; }
@@ -102,7 +392,7 @@ async function loadMe(){
   S.trucks = d.trucks || []; S.trailers = d.trailers || [];
   S.simulatedPayments = !!d.simulatedPayments;
 }
-/* Friendly URLs for the screens people bookmark or share. Anything else keeps
+/* Friendly URLs for the screens people bookmark or share; everything else keeps
    its internal view name as the path. The phone's Back button walks these. */
 const FRIENDLY_PATHS = {
   'd-home': '/', 'd-garage': '/garage', 'd-threads': '/messages', 'd-request': '/request',
@@ -123,12 +413,11 @@ function viewFromPath(path){
   }[path];
   const view = alias || (VIEWS[path.slice(1)] ? path.slice(1) : null);
   if (!view) return null;
-  // role guard: a driver can't deep-link into provider or admin screens
-  const p = view.split('-')[0];
-  if (p === 'a' && role !== 'admin') return null;
-  if (p === 'p' && role !== 'provider') return null;
-  if (p === 'd' && role !== 'driver' && role !== 'admin') return null;
-  if (p === 't' && mr !== 'tech') return null;
+  const prefix = view.split('-')[0];
+  if (prefix === 'a' && role !== 'admin') return null;
+  if (prefix === 'p' && role !== 'provider') return null;
+  if (prefix === 'd' && role !== 'driver' && role !== 'admin') return null;
+  if (prefix === 't' && mr !== 'tech') return null;
   return view;
 }
 // The pieces of S a screen needs to rebuild itself after Back/Forward.
@@ -167,32 +456,87 @@ function homeFor(){
 
 /* ---------------- live updates (WebSocket) ---------------- */
 let ws = null;
+let liveRefreshTimer = null;
+let wsConnectedOnce = false;
+function showLiveConnectionNotice(show){
+  let notice = $('liveConnectionNotice');
+  if (!notice && show) {
+    notice = document.createElement('div');
+    notice.id = 'liveConnectionNotice';
+    notice.className = 'noticebar connection';
+    notice.setAttribute('role', 'status');
+    notice.innerHTML = `<span>${T('Live updates disconnected. Reconnecting…')}</span><button type="button" onclick="connectWS()">${T('Retry now')}</button>`;
+    document.body.prepend(notice);
+  }
+  if (notice) notice.hidden = !show;
+}
+function refreshAuthoritativeView(){
+  if (!S.me) return;
+  clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = setTimeout(() => {
+    const liveViews = new Set(['d-active','p-feed','p-jobs','t-jobs','a-home','a-exceptions']);
+    if (liveViews.has(S.view)) render();
+  }, 120);
+}
 function connectWS(){
   if (ws) try { ws.close(); } catch(e){}
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onmessage = ev => {
+  ws.onopen = () => {
+    const wasDisconnected = wsConnectedOnce;
+    wsConnectedOnce = true;
+    showLiveConnectionNotice(false);
+    if (wasDisconnected) toast(T('Live updates reconnected'));
+  };
+  ws.onmessage = async ev => {
     let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
     const { event, data } = msg;
+    if (event === 'hello') {
+      try { await loadMe(); } catch(e){}
+      refreshAuthoritativeView();
+      return;
+    }
     if (event === 'new_lead'){
-      toast(`New ${data.service} lead ${data.band} away — open Live Leads`);
+      toast(T('New {service} lead {band} away — open Live Leads', { service: data.service, band: data.band }));
       if (S.view === 'p-feed') render();
     }
     if (event === 'responder'){
-      toast(`${data.name} unlocked your request`);
+      toast(T('{name} unlocked your request', { name: data.name }), true);
       if (S.view === 'd-active' && S.activeRequestId === data.request_id) render();
     }
     if (event === 'message'){
-      toast('New message');
+      toast(T('New message'));
       if (S.view === 'd-chat' || S.view === 'p-chat') render();
     }
     if (event === 'selected'){
-      toast(data.won ? 'You got the job!' : 'Driver went with another provider');
+      toast(T(data.won ? 'You got the job!' : 'Driver went with another provider'), true);
       if (S.view.startsWith('p-')) render();
     }
+    if (['job_assigned','job_unassigned','job_status','job_rescue','job_bounced',
+         'job_cancelled','job_reopened'].includes(event)) {
+      const notice = {
+        job_assigned: 'A job was assigned',
+        job_unassigned: 'A job assignment changed',
+        job_status: 'Job status updated',
+        job_rescue: 'A driver needs dispatch help',
+        job_bounced: 'A job returned to dispatch',
+        job_cancelled: 'A job was cancelled',
+        job_reopened: 'A driver reopened a request'
+      }[event];
+      toast(T(notice), true);
+      refreshAuthoritativeView();
+    }
   };
-  ws.onclose = () => setTimeout(()=>{ if (S.me) connectWS(); }, 4000);
+  ws.onclose = () => {
+    if (!S.me) return;
+    showLiveConnectionNotice(true);
+    setTimeout(()=>{ if (S.me && ws?.readyState !== WebSocket.OPEN) connectWS(); }, 4000);
+  };
 }
+setInterval(() => {
+  if (S.me && ['d-active','p-jobs','t-jobs','a-exceptions'].includes(S.view))
+    refreshAuthoritativeView();
+}, 30000);
 
 /* ---------------- auth views ---------------- */
 function authShell(inner, wide){
@@ -206,12 +550,12 @@ function vSignin(){
   <div class="card" style="padding:20px">
     <span class="sec">${T('Sign in or create an account')}</span>
     <label class="f">${T('Mobile number')}</label>
-    <input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel"
+    <input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel" value="${esc(S.pendingPhone)}"
       inputmode="tel" enterkeyhint="go" onkeydown="if(event.key==='Enter')sendCode()">
     <label class="f">${T('I am a…')}</label>
     <div class="chips" id="si-role">
-      <span class="chip sel" data-en="Truck driver" onclick="togOne(this)">${T('Truck driver')}</span>
-      <span class="chip" data-en="Service company" onclick="togOne(this)">${T('Service company')}</span>
+      <span class="chip ${S.pendingRole === 'provider' ? '' : 'sel'}" data-en="Truck driver" onclick="togOne(this)">${T('Truck driver')}</span>
+      <span class="chip ${S.pendingRole === 'provider' ? 'sel' : ''}" data-en="Service company" onclick="togOne(this)">${T('Service company')}</span>
     </div>
     <div style="height:14px"></div>
     <button class="btn" onclick="requestCode()">${ic('mobile',16)} ${T('Text me a code')}</button>
@@ -222,7 +566,7 @@ function vSignin(){
 }
 async function requestCode(){
   const phone = qv('si-phone').trim();
-  if (!phone) return toast(T('Enter your mobile number'));
+  if (firstInvalid([['si-phone', /^\+?[\d\s().-]{7,}$/.test(phone), T('Enter a valid mobile number')]])) return;
   const role = selOf('si-role')[0] === 'Service company' ? 'provider' : 'driver';
   const d = await api('POST', '/auth/request-code', { phone });
   S.pendingPhone = phone; S.pendingRole = role; S.devCode = d.devCode || null;
@@ -267,6 +611,7 @@ async function verifyCode(){
 }
 async function signOut(){
   await api('POST', '/auth/logout').catch(()=>{});
+  clearAllFormProgress();
   S.me = null; S.provider = null;
   if (ws) try { ws.close(); } catch(e){}
   nav('signin');
@@ -283,7 +628,7 @@ function sel(id, options, current, opts = {}){
   return `
   <select id="${id}" onchange="onSelChange('${id}')" data-field="${opts.field || id}">
     <option value="">${T(opts.placeholder || 'Select…')}</option>
-    ${list.map(o=>`<option ${o===current?'selected':''}>${esc(o)}</option>`).join('')}
+    ${list.map(o=>`<option value="${esc(o)}" ${o===current?'selected':''}>${esc(o)}</option>`).join('')}
     <option value="__other" ${isOther?'selected':''}>${T('Other…')}</option>
   </select>
   <input type="text" id="${id}-other" placeholder="${T(opts.otherPlaceholder || 'Type it in')}"
@@ -291,10 +636,7 @@ function sel(id, options, current, opts = {}){
 }
 function onSelChange(id){
   const box = $(id + '-other');
-  if (!box) return;
-  const other = $(id).value === '__other';
-  box.style.display = other ? 'block' : 'none';
-  if (other) box.focus();
+  RIGRXFormProgress.syncOtherControl($(id), box, true);
 }
 // Read a select+other pair as one value
 function selVal(id){
@@ -333,43 +675,44 @@ function setupTop(backView, backLabel, homeView){
 function vDSetup1(){
   return authShell(`
   ${isSetUpDriver() ? setupTop(null, null, 'd-home') : ''}
-  ${progress(1,3)}
+  ${progress(1,1)}
   <h2 class="scr">${T("Welcome — let's set you up")}</h2>
-  <p class="scrsub">${T('Step 1 of 3 · about 2 minutes. Broke down right now?')} <a onclick="nav('d-home')">${T('Skip, request help first')}</a></p>
-  <label class="f">${T('Full name')}</label><input type="text" id="su-name" value="${esc(S.me?.name)}">
-  <label class="f">${T('Email (receipts & updates)')}</label><input type="text" id="su-email" value="${esc(S.me?.email)}">
+  <p class="scrsub">${T('Essential setup · about 30 seconds. Add truck and trailer details later.')} ${S.me?.name ? '' : `<button class="plain-link" onclick="nav('d-home')">${T('Skip, request help first')}</button>`}</p>
+   <label class="f" for="su-name">${T('Full name')}</label><input type="text" id="su-name" autocomplete="name" required value="${esc(S.me?.name)}">
+   <label class="f" for="su-email">${T('Email (receipts & updates)')}</label><input type="email" inputmode="email" autocomplete="email" id="su-email" value="${esc(S.me?.email)}">
   <label class="f">${T('I am a…')}</label>
   <div class="chips" id="su-type">
     ${['Owner-operator','Company driver','Fleet dispatcher'].map((t,i)=>`<span class="chip ${ (S.me?.driver_type||'Owner-operator')===t?'sel':''}" data-en="${t}" onclick="togOne(this)">${T(t)}</span>`).join('')}
   </div>
-  <label class="f">${T('Company & MC/DOT # (optional)')}</label><input type="text" id="su-company" value="${esc(S.me?.company)}">
+  <label class="f" for="su-company">${T('Company & MC/DOT # (optional)')}</label><input type="text" id="su-company" autocomplete="organization" value="${esc(S.me?.company)}">
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveDSetup1()">${T('Continue')} ${ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="saveDSetup1()">${T('Save & request-ready')} ${ic('arrowR',15)}</button>`);
 }
 async function saveDSetup1(){
-  if (!qv('su-name').trim()) return toast(T('Enter your name'));
+  if (firstInvalid([['su-name', qv('su-name').trim().length >= 2, T('Enter your name')]])) return;
   const d = await api('PUT', '/driver/profile', {
     name: qv('su-name'), email: qv('su-email'),
     driver_type: selOf('su-type')[0] || 'Owner-operator', company: qv('su-company') });
   S.me = d.user;
-  nav('d-setup2');
+  clearFormProgress('d-setup1');
+  toast(T('Profile saved — you can add your rig later'), true);
+  nav('d-home');
 }
 // Duty class drives every list below it, so it is the first question asked.
 function setDutyClass(cls){
   if (S.dutyClass === cls) return;
-  const keep = S.view === 'd-setup2' ? readTruckForm() : null;
   S.dutyClass = cls;
-  if (keep) S.editTruck = { ...(S.editTruck || {}), ...keep, duty: cls };
+  updateFormProgress({ '__chips_duty-class': [cls] });
   render();
 }
 function dutyPicker(current){
   const list = EQ().DUTY_CLASSES || [];
   return `
   <label class="f">${T('What size truck is this?')}</label>
-  <div class="dutyrow">
+  <div class="dutyrow" id="duty-class">
     ${list.map(d=>`
-    <div class="dutycard ${d.key===current?'sel':''}" onclick="setDutyClass('${d.key}')">
-      <b>${esc(T(d.label))}</b><span>${esc(T(d.blurb))}</span>
+    <div class="dutycard ${d.key===current?'sel':''}" data-key="${d.key}" onclick="setDutyClass('${d.key}')">
+      <b>${esc(d.label)}</b><span>${esc(d.blurb)}</span>
     </div>`).join('')}
   </div>`;
 }
@@ -394,7 +737,7 @@ function truckForm(t = {}){
     <div><label class="f">${T('Make')}</label>
       <select id="tk-make" onchange="onMakeChange()" data-field="truck_make">
         <option value="">${T('Select make…')}</option>
-        ${forClass(EQ().MAKES, cls).map(m=>`<option ${m===t.make?'selected':''}>${esc(m)}</option>`).join('')}
+        ${forClass(EQ().MAKES, cls).map(m=>`<option value="${esc(m)}" ${m===t.make?'selected':''}>${esc(m)}</option>`).join('')}
         <option value="__other" ${t.make && !forClass(EQ().MAKES, cls).includes(t.make) ? 'selected':''}>${T('Other…')}</option>
       </select>
       <input type="text" id="tk-make-other" placeholder="${T('Type the make')}"
@@ -422,7 +765,7 @@ function truckForm(t = {}){
   </div>
   <label class="f">${T('Extras (optional)')}</label>
   <div class="chips" id="tk-extras">
-    ${(EQ().TRUCK_EXTRAS || []).map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" onclick="tog(this)">${esc(e)}</span>`).join('')}
+    ${(EQ().TRUCK_EXTRAS || []).map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" data-en="${esc(e)}" onclick="tog(this)">${esc(e)}</span>`).join('')}
   </div>`;
 }
 function readTruckForm(){
@@ -433,26 +776,30 @@ function readTruckForm(){
     color: selVal('tk-color'), vin: qv('tk-vin'), plate: qv('tk-plate'), extras: selOf('tk-extras') };
 }
 function vDSetup2(){
-  if (S.editTruck?.duty) S.dutyClass = S.editTruck.duty;
+  ensureFormProgressCurrent('d-setup2');
+  const saved = RIGRXFormProgress.truckDraftFromProgress(readFormProgress('d-setup2'));
+  if (saved?.duty) S.dutyClass = saved.duty;
+  else if (S.editTruck?.duty) S.dutyClass = S.editTruck.duty;
+  const truck = saved ? { ...(S.editTruck || {}), ...saved } : (S.editTruck || {});
   return authShell(`
   ${isSetUpDriver()
     ? setupTop('d-garage', 'My Garage', 'd-home')
     : setupTop('d-setup1', 'Back')}
   ${progress(2,3)}
   <h2 class="scr">${T('Add your truck')}</h2>
-  <p class="scrsub">${T('Step 2 of 3 — every detail here saves a question at 2 AM')}</p>
-  ${truckForm(S.editTruck || {})}
+   <p class="scrsub">${T('Optional now — add rig details later to save questions at 2 AM')}</p>
+  ${truckForm(truck)}
   <div style="height:16px"></div>
   <button class="btn" onclick="saveDSetup2()">${isSetUpDriver() ? ic('check',16) + ' ' + T('Save truck') : T('Continue') + ' ' + ic('arrowR',15)}</button>`);
 }
 async function saveDSetup2(){
   const data = readTruckForm();
-  if (!data.make) return toast(T('At least enter the make'));
   const wasSetUp = isSetUpDriver();
   if (S.editTruck?.id) await api('PUT', '/trucks/' + S.editTruck.id, { data });
   else await api('POST', '/trucks', { data });
+  clearFormProgress('d-setup2');
   await loadMe();
-  if (wasSetUp) { toast(T('Truck saved')); S.editTruck = null; return nav('d-garage'); }
+  if (wasSetUp) { toast(T('Truck saved'), true); S.editTruck = null; return nav('d-garage'); }
   nav('d-setup3');
 }
 function trailerForm(r = {}){
@@ -515,9 +862,10 @@ async function saveDSetup3(){
   if (data.type && !/bobtail/i.test(data.type)){
     if (S.editTrailer?.id) await api('PUT', '/trailers/' + S.editTrailer.id, { data });
     else await api('POST', '/trailers', { data });
+  clearFormProgress('d-setup3');
   }
   await loadMe();
-  if (wasSetUp) { toast(T('Trailer saved')); S.editTrailer = null; return nav('d-garage'); }
+  if (wasSetUp) { toast(T('Trailer saved'), true); S.editTrailer = null; return nav('d-garage'); }
   toast(T('Profile complete — your garage is ready'));
   nav('d-home');
 }
@@ -534,7 +882,7 @@ async function vDHome(){
   <button class="btn big" onclick="startRequest()">${ic('zap',18)} ${T('REQUEST HELP NOW')}</button>
   <div style="height:14px"></div>
   ${open.map(x=>`<div class="card click" onclick="nav('d-active',{activeRequestId:${x.id}})">
-    <div class="row"><span class="mini k">${ic(svcIcon(x.service_key),15)} &nbsp;${T('Request #')}${x.id} — ${esc(T(x.service_label))} · ${TN(x.buyer_count,'{n} responder','{n} responders')}</span>
+    <div class="row"><span class="mini k">${ic(svcIcon(x.service_key),15)} &nbsp;${T('Request #')}${x.id} — ${esc(x.service_label)} · ${TN(x.buyer_count,'{n} responder','{n} responders')}</span>
     <span class="pill ${x.status==='open'?'red':'dark'}">${T(x.status.toUpperCase())}</span></div></div>`).join('')}
   <div class="cols2"><div>
   <div class="card">
@@ -545,13 +893,13 @@ async function vDHome(){
   <div class="card">
     <span class="sec">${T('History')}</span>
     ${mine.filter(x=>['completed','cancelled','expired'].includes(x.status)).slice(0,5).map(x=>`
-      <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(T(x.service_label))}</b><div class="faint">${timeAgo(x.created_at)} · ${T(x.status)}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No past requests yet')}</div>`}
+      <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(x.service_label)}</b><div class="faint">${timeAgo(x.created_at)} · ${T(x.status)}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No past requests yet')}</div>`}
   </div></div></div>`;
 }
 function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no', direction: '',
               lat: null, lng: null, photos: [],
-              licensed_only: false,   // every request starts wide open — narrowing is an explicit choice each time
+              licensed_only: false,   // narrowing is an explicit choice each time, never a remembered surprise
               trade_filter: [],
               duty_class: S.trucks?.[0]?.data?.duty || 'heavy' };
   nav('d-request');
@@ -563,7 +911,7 @@ function vDRequest(){
   <p class="scrsub">${T('Step 1 of 4 — pick a service')}</p>
   <div class="grid2s">
     ${cats.map(c=>`<div class="svc" onclick="pickSvc('${c.key}')">
-      <div class="em">${ic(c.icon,26)}</div><div class="nm">${esc(T(c.label))}</div><div class="ds">${esc(T(c.blurb))}</div></div>`).join('')
+       <div class="em">${ic(c.icon,26)}</div><div class="nm">${esc(c.label)}</div><div class="ds">${esc(c.blurb)}</div></div>`).join('')
       || `<div class="card"><span class="muted">${T('No services available yet')}</span></div>`}
   </div>`;
 }
@@ -571,6 +919,12 @@ function pickSvc(key){
   const c = catByKey(key);
   if (!c) return toast(T('That service is unavailable'));
   if (!S.draft) startRequest();
+  const uploadDraft = readFormProgress('d-details')?.['__uploads_rq-photo'];
+  if ((S.draft.service_key && S.draft.service_key !== key) ||
+      (uploadDraft?.service_key && uploadDraft.service_key !== key)) {
+    S.draft.photos = [];
+    updateFormProgress({}, ['__uploads_rq-photo'], 'd-details');
+  }
   S.draft.service_key = key; S.draft.service_label = c.label; S.draft.icon = c.icon;
   S.draft.service_item = '';
   nav('d-details');
@@ -580,7 +934,7 @@ function vDDetails(){
   const t = S.trucks, r = S.trailers;
   return `
   <button class="back" onclick="nav('d-request')">${ic('chevL',15)} ${T('Back')}</button>
-  <h2 class="scr">${ic(d.icon,20)} ${esc(T(d.service_label))}</h2>
+   <h2 class="scr">${ic(d.icon,20)} ${esc(d.service_label)}</h2>
   <p class="scrsub">${T('Step 2 of 4 — the details providers need')}</p>
   <label class="f">${T('Truck')}</label>
   <div class="chips" id="rq-truck">
@@ -607,7 +961,8 @@ function vDDetails(){
   <label class="f">${T('Photos (optional but providers respond faster with them)')}</label>
   <div class="chips" id="rq-photos">
     ${d.photos.map(p=>`<span class="chip">${ic('camera',13)} ${T('added')}</span>`).join('')}
-    <label class="chip dashed" style="cursor:pointer">${T('+ Add photo')}<input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this)"></label>
+    <input id="rq-photo" class="sr-only" type="file" accept="image/*" onchange="uploadPhoto(this)">
+    <label class="chip dashed" for="rq-photo" style="cursor:pointer">${T('+ Add photo')}</label>
   </div>
   <div style="height:16px"></div>
   <button class="btn" onclick="saveDetails()">${T('Continue')} ${ic('arrowR',15)}</button>`;
@@ -619,7 +974,7 @@ function subPicker(d){
   return `
   <label class="f">${T('What kind?')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('(optional — helps them bring the right parts)')}</span></label>
   <div class="chips" id="rq-subitem">
-    ${items.map(i=>`<span class="chip ${i.label===d.service_item?'sel':''}" data-en="${esc(i.label)}" onclick="togOne(this)">${esc(T(i.label))}</span>`).join('')}
+    ${items.map(i=>`<span class="chip ${i.label===d.service_item?'sel':''}" data-en="${esc(i.label)}" onclick="togOne(this)">${esc(i.label)}</span>`).join('')}
   </div>`;
 }
 
@@ -652,6 +1007,7 @@ function tirePicker(d){
 function pickAxle(el){
   togOne(el);
   S.draft.tire_position = readTirePicker();
+  saveFormSelection($('rq-tire-axle'));
   render();   // steer axles have no inner/outer, so the options change
 }
 function readTirePicker(){
@@ -671,7 +1027,15 @@ async function uploadPhoto(input){
   const fd = new FormData(); fd.append('file', input.files[0]);
   const res = await fetch('/api/upload', { method: 'POST', body: fd });
   const data = await res.json();
-  if (data.url){ S.draft.photos.push(data.url); toast(T('Photo added')); render(); }
+  if (data.url){
+    S.draft.photos = RIGRXFormProgress.normalizeUploadedReferences([...S.draft.photos, data.url]);
+    updateFormProgress({ '__uploads_rq-photo': {
+      service_key: S.draft.service_key,
+      references: S.draft.photos
+    } });
+    toast(T('Photo added'), true);
+    render();
+  }
 }
 function saveDetails(){
   const d = S.draft;
@@ -691,18 +1055,21 @@ function saveDetails(){
 }
 function vDLocation(){
   const d = S.draft;
+  const locationFresh = d.location_source === 'manual'
+    || (d.location_captured_at && Date.now() - new Date(d.location_captured_at).getTime() < 15 * 60 * 1000);
   return `
   <button class="back" onclick="nav('d-details')">${ic('chevL',15)} ${T('Back')}</button>
   <h2 class="scr">${T('Where are you?')}</h2>
   <p class="scrsub">${T('Step 3 of 4 — this is how they find you')}</p>
   ${d.lat ? `
   <div class="card">
-    <div class="row"><span class="sec">${ic('check',14)} ${T('Location locked')}</span>
+    <div class="row"><span class="sec">${ic(locationFresh?'check':'warn',14)} ${T(locationFresh ? 'Location locked' : 'Location needs a refresh')}</span>
       <a class="faint" onclick="captureGPS()">${T('re-capture')}</a></div>
     <div class="mini listline" style="margin-top:6px">
       <span class="muted">${T('Companies will see')}</span> &nbsp;<b class="k">${esc(d.area_label || T('locating…'))}</b><br>
-      <span class="muted">${T('Exact GPS')}</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">${T('(only shown after they buy)')}</span>
+      <span class="muted">${T(d.location_source === 'manual' ? 'Location type' : 'Exact GPS')}</span> &nbsp;${d.location_source === 'manual' ? `<b class="k">${T('Approximate town — landmark required')}</b>` : `${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">${T('(only shown after they buy)')}</span>`}
     </div>
+    ${locationFresh ? '' : `<div class="mini" style="color:var(--red);margin-top:8px">${T('This GPS point is more than 15 minutes old. Capture it again or enter a town by hand before sending.')}</div>`}
   </div>` : `
   <div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">${T('Tap below to share your location.')}</b> ${T('Your exact spot stays hidden until a company pays for the lead — they only see the general area first.')}</div>
@@ -719,8 +1086,8 @@ function vDLocation(){
   <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="${T('I-5 NB shoulder, mile marker 253, past the Buttonwillow exit')}">
   <div class="faint" style="margin-top:6px">${T('Only companies that buy your lead see this.')}</div>
   <div style="height:16px"></div>
-  <button class="btn" onclick="saveLocation()" ${d.lat ? '' : 'disabled'}>${T('Continue')} ${ic('arrowR',15)}</button>
-  ${d.lat ? '' : `<div class="faint" style="text-align:center; margin-top:9px">${T('Share your location to continue — or')} <a onclick="manualLocation()">${T('enter it by hand')}</a></div>`}`;
+  <button class="btn" onclick="saveLocation()" ${d.lat && locationFresh ? '' : 'disabled'}>${T('Continue')} ${ic('arrowR',15)}</button>
+  ${d.lat && locationFresh ? '' : `<div class="faint" style="text-align:center; margin-top:9px">${T('Share a current location to continue — or')} <a onclick="manualLocation()">${T('enter it by hand')}</a></div>`}`;
 }
 async function lookupArea(){
   const d = S.draft;
@@ -736,6 +1103,13 @@ function captureGPS(){
   navigator.geolocation.getCurrentPosition(
     pos => {
       S.draft.lat = pos.coords.latitude; S.draft.lng = pos.coords.longitude;
+      S.draft.location_source = 'device';
+      S.draft.location_captured_at = new Date(pos.timestamp || Date.now()).toISOString();
+      S.draft.location_accuracy_m = pos.coords.accuracy;
+      if (Date.now() - new Date(S.draft.location_captured_at).getTime() >= 15 * 60 * 1000) {
+        toast(T('That GPS point is stale — capture it again or enter a town by hand'));
+        return render();
+      }
       toast(T('Location locked')); lookupArea();
     },
     () => toast(T('GPS unavailable — enter it by hand instead')),
@@ -755,6 +1129,8 @@ function manualLocation(){
       </div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  localizeVisible(el);
+  makeControlsAccessible(el);
   document.body.appendChild(el);
   setTimeout(()=>$('manual-city')?.focus(), 50);
 }
@@ -764,13 +1140,21 @@ function useManualCity(){
   closeConfirm();
   S.draft.lat = c.lat; S.draft.lng = c.lng;
   S.draft.area_label = 'Near ' + c.label;
+  S.draft.location_source = 'manual';
+  S.draft.location_captured_at = new Date().toISOString();
+  S.draft.location_accuracy_m = null;
   toast(T('Saved — add a mile marker below so they can find you'));
   render();
 }
 function saveLocation(){
   const d = S.draft;
   if (!d.lat) return toast(T('Share your location first'));
+  if (d.location_source !== 'manual'
+      && (!d.location_captured_at || Date.now() - new Date(d.location_captured_at).getTime() >= 15 * 60 * 1000))
+    return toast(T('Capture a fresh GPS point or enter a town by hand'));
   d.landmark = qv('rq-landmark');
+  if (d.location_source === 'manual' && !d.landmark.trim())
+    return toast(T('Add a landmark or mile marker for a manual location'));
   d.direction = selOf('rq-direction')[0] || '';
   nav('d-review');
 }
@@ -783,7 +1167,7 @@ function vDReview(){
   <h2 class="scr">${T('Ready to send?')}</h2>
   <p class="scrsub">${T('Step 4 of 4 — providers near you get alerted instantly')}</p>
   <div class="card">
-    <div class="row"><b class="k" style="display:inline-flex;align-items:center;gap:7px">${ic(d.icon)} ${esc(T(d.service_label))}</b>
+    <div class="row"><b class="k" style="display:inline-flex;align-items:center;gap:7px">${ic(d.icon)} ${esc(d.service_label)}</b>
       <span class="pill solid">${T(d.can_move==='no' ? "CAN'T MOVE" : 'CAN MOVE')}</span></div>
     <div class="divider"></div>
     <div class="mini listline">
@@ -803,7 +1187,7 @@ function vDReview(){
     </div>
     <label class="f">${T('Only companies whose main work is…')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('(optional)')}</span></label>
     <div class="chips" id="rq-trades">
-      ${(S.trades||[]).map(t=>`<span class="chip ${(d.trade_filter||[]).includes(t.key)?'sel':''}" data-key="${t.key}" onclick="tog(this); previewMatches()">${esc(T(t.label))}</span>`).join('')}
+      ${(S.trades||[]).map(t=>`<span class="chip ${(d.trade_filter||[]).includes(t.key)?'sel':''}" data-key="${t.key}" onclick="tog(this); previewMatches()">${esc(t.label)}</span>`).join('')}
     </div>
     <div class="faint" style="margin-top:10px; line-height:1.5" id="matchPreview">${T('Checking how many companies match…')}</div>
   </div>
@@ -839,9 +1223,10 @@ async function sendRequest(btn){
   const d = readFilters();
   try {
     const res = await api('POST', '/requests', d);
+    clearRequestProgress();
     toast(res.notified === 0
       ? T(d.licensed_only ? 'No licensed companies nearby — see options below' : 'No providers cover this area yet')
-      : TN(res.notified, '{n} provider notified', '{n} providers notified') + (res.expanded ? T(' (search radius expanded)') : ''));
+      : TN(res.notified, '{n} provider notified', '{n} providers notified') + (res.expanded ? T(' (search radius expanded)') : ''), true);
     nav('d-active', { activeRequestId: res.request.id });
   } catch(e){ btn.disabled = false; }
 }
@@ -888,11 +1273,30 @@ async function vDActive(){
   const d = await api('GET', '/requests/' + S.activeRequestId);
   const r = d.request;
   const filled = d.responders.length;
+  const waitingMinutes = Math.max(0, Math.floor((Date.now() - new Date(r.created_at).getTime()) / 60000));
+  const selectedWaiting = r.status === 'selected'
+    && ['unassigned','assigned','accepted'].includes(r.job_state);
   return `
   <button class="back" onclick="nav('d-home')">${ic('chevL',15)} ${T('Home')}</button>
   <h2 class="scr">${r.status==='open' ? (r.notified_count > 0 || filled ? T('Help is on the way') : T('Nobody has been alerted yet')) : T('Request #')+r.id}</h2>
-  <p class="scrsub">${T('Request #')}${r.id} · ${esc(T(r.service_label))} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')}</p>
+  <p class="scrsub">${T('Request #')}${r.id} · ${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')}</p>
   ${onTheWayCard(d.on_the_way)}
+  ${selectedWaiting ? `
+    <div class="card alert">
+      <div class="row"><div>
+        <b class="mini k">${ic('clock',14)} ${esc(d.selected_company?.name || T('Your chosen company'))} ${T('is preparing your dispatch')}</b>
+        <div class="faint" style="margin-top:5px">${r.job_state === 'accepted'
+          ? T('A technician accepted, but has not started toward you yet.')
+          : r.job_state === 'assigned'
+            ? T('A technician was assigned and has not accepted yet.')
+            : T('The company still needs to assign a technician.')}</div>
+      </div><span class="pill red">${T('NOT MOVING YET')}</span></div>
+      <div class="actions" style="margin-top:12px;flex-wrap:wrap">
+        ${d.selected_company?.phone ? `<a class="btn chat" href="tel:${esc(d.selected_company.phone)}">${ic('mobile',15)} ${T('Call company')}</a>` : ''}
+        <button class="btn choose" onclick="rescueJob(${r.id})">${ic('bell',15)} ${T('Get dispatch help')}</button>
+      </div>
+      ${r.rescue_requested_at ? `<button class="btn ghost" style="margin-top:9px" onclick="reopenRequest(${r.id})">${T('Choose a different responder')}</button>` : ''}
+    </div>` : ''}
   <div class="card">
     <div class="row"><span class="sec">${T('Response Slots')}</span><span class="pill red">${filled ? T('{n} of 4 responded', { n: filled }) : T('notifying…')}</span></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
@@ -917,7 +1321,11 @@ async function vDActive(){
       <div style="height:10px"></div>
       <button class="btn" onclick="openToAll(${r.id})">${T('Alert every approved company nearby')}</button>
     </div>` : ''}
-  ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) && !(r.notified_count === 0 && r.duty_class && r.duty_class !== 'heavy') ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} ${T("Waiting for providers to respond… you'll get a text the second one does.")}</span></div>` : ''}
+  ${filled === 0 && r.status === 'open' && r.notified_count > 0 ? `<div class="card" style="text-align:center">
+    <span class="muted">${ic('clock',13)} ${T("Waiting for providers to respond… you'll get a text the second one does.")}</span>
+    ${waitingMinutes >= 5 ? `<div style="height:10px"></div>
+      <button class="btn ghost" onclick="retryRequest(${r.id})">${ic('zap',15)} ${T('Search a wider area and alert again')}</button>` : ''}
+  </div>` : ''}
   ${filled > 0 && r.status === 'open' ? `<div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('chat',14)} <b class="k">${T('Message them before you choose.')}</b> ${T("Ask for an ETA and a price, then compare. Choosing is final — it ends the request and tells the other companies they didn't get it.")}</div>
   </div>` : ''}
@@ -936,17 +1344,35 @@ async function vDActive(){
         ${r.status==='open' ? `<button class="btn choose" onclick="askChoose(${r.id},${x.provider_id},'${esc(x.name).replace(/'/g,"")}')">${ic('check',15)} ${T('Choose')}</button>` : ''}
       </div>
     </div>`).join('')}
-  ${r.status==='selected' ? `
+  ${r.status==='selected' && r.job_state==='arrived' ? `
     <button class="btn dark" onclick="completeRequest(${r.id})">${ic('check',16)} ${T('Mark job complete')}</button>` : ''}
   ${r.status==='completed' ? `
     <div class="card click" onclick="nav('d-rate',{rateRequestId:${r.id}})"><div class="row"><span class="mini k">${ic('star',14)} &nbsp;${T('Rate this provider')}</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
-  ${r.status==='open' ? `<button class="btn ghost" onclick="cancelRequest(${r.id})">${T('Cancel request')}</button>` : ''}`;
+  ${r.status==='open' || selectedWaiting ? `<button class="btn ghost" onclick="cancelRequest(${r.id})">${T('Cancel request')}</button>` : ''}`;
 }
 async function openToAll(reqId){
   const res = await api('POST', `/requests/${reqId}/open-to-all`);
   toast(res.notified === 0
     ? T('Still nobody in range — RIGRX has been alerted and will help find someone')
     : TN(res.notified, '{n} more company notified', '{n} more companies notified'));
+  render();
+}
+async function retryRequest(reqId){
+  const res = await api('POST', `/requests/${reqId}/retry`);
+  toast(res.notified
+    ? T('{n} companies alerted in the wider search', { n: res.notified })
+    : T('No companies matched yet — operations can now see this request'));
+  render();
+}
+async function rescueJob(reqId){
+  await api('POST', `/requests/${reqId}/rescue`);
+  toast(T('Dispatch and operations were alerted'));
+  render();
+}
+async function reopenRequest(reqId){
+  if (!confirm(T('Put this request back with your responders so you can choose another company?'))) return;
+  await api('POST', `/requests/${reqId}/reopen`);
+  toast(T('Request reopened — choose another responder'));
   render();
 }
 function askChoose(reqId, provId, name){
@@ -966,7 +1392,10 @@ function askChoose(reqId, provId, name){
       </div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  localizeVisible(el);
+  makeControlsAccessible(el);
   document.body.appendChild(el);
+  setTimeout(() => el.querySelector('button,input,select,textarea')?.focus(), 20);
 }
 function closeConfirm(){ $('confirmWrap')?.remove(); }
 async function confirmChoose(reqId, provId){
@@ -1021,7 +1450,7 @@ async function vDPubProfile(){
   </div><div>
   <div class="card">
     <span class="sec">${T('Recent reviews')}</span>
-    ${p.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">${timeAgo(rv.created_at)} · ${esc(T(rv.service_label))}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No reviews yet — new to RIGRX')}</div>`}
+    ${p.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">${timeAgo(rv.created_at)} · ${esc(rv.service_label)}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No reviews yet — new to RIGRX')}</div>`}
   </div>
   </div></div>`;
 }
@@ -1049,7 +1478,8 @@ function vDRate(){
 async function submitReview(){
   await api('POST', '/reviews', { request_id: S.rateRequestId, stars: S.rateStars,
     tags: selOf('rate-tags'), comment: qv('rate-comment') });
-  toast(T('Thanks — your review is live on their profile'));
+  clearFormProgress('d-rate');
+  toast(T('Thanks — your review is live on their profile'), true);
   nav('d-home');
 }
 // Removing a rig only affects the garage. Requests already sent keep their own
@@ -1102,7 +1532,7 @@ async function vThreads(){
   <p class="scrsub">${T(rows.length ? 'One thread per request & company' : 'No conversations yet')}</p>
   ${rows.map(t=>`<div class="card click" onclick="openThread(${t.request_id},${t.provider_id},null)">
     <div class="row"><div><b class="mini k">${esc(t.other_name || T('Conversation'))}</b>
-    <div class="faint">${T('Request #')}${t.request_id} · ${esc(T(t.service_label))}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
+    <div class="faint">${T('Request #')}${t.request_id} · ${esc(t.service_label)}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
     <span class="pill ${t.status==='open'?'red':'gray'}">${esc(T(t.status))}</span></div></div>`).join('')}`;
 }
 function openThread(reqId, provId, from){
@@ -1148,7 +1578,7 @@ async function chatView(backView){
         <div class="mini" style="line-height:1.5">${ic('lock',13)} ${T('Keep your exact spot to yourself until you pick someone — they already have the distance they need to quote you. Once you choose, they get the pin automatically.')}</div>
       </div>` : ''}
       ${!isDriver && open ? `<div class="card alert">
-        <div class="mini" style="line-height:1.5">${ic('lock',13)} <b class="k">Don't ask for the exact location here.</b> You get the pin, the mile marker and turn-by-turn directions the second this driver picks you. Asking for it early is against the rules and gets flagged for review.</div>
+        <div class="mini" style="line-height:1.5">${ic('lock',13)} <b class="k">${T("Don't ask for the exact location here.")}</b> ${T('You get the pin, the mile marker and turn-by-turn directions the second this driver picks you. Asking for it early is against the rules and gets flagged for review.')}</div>
       </div>` : ''}
       ${d.messages.map(m=>`
         <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
@@ -1218,12 +1648,20 @@ async function sendChat(){
   await postChat(body, S.guardWaived);
 }
 async function postChat(body, warned){
+  const originView = S.view;
+  const originChat = { ...(S.chatKey || {}) };
+  const draftKey = formProgressKey(originView);
+  const draftRevision = Number(readFormProgressKey(draftKey)?.__revision || 0);
+  const submittedInput = qv('chatIn');
   S.guardWaived = false;
   S.chatDraft = '';
   const el = $('chatIn'); if (el) el.value = '';
-  S.keepChatFocus = true;   // keyboard stays up after sending, like iMessage
-  await api('POST', `/messages/${S.chatKey.r}/${S.chatKey.p}`, { body, warned: !!warned });
-  render();
+  await api('POST', `/messages/${originChat.r}/${originChat.p}`, { body, warned: !!warned });
+  clearCommittedProgressFields(draftKey, { chatIn: submittedInput }, draftRevision);
+  if (S.view === originView && S.chatKey?.r === originChat.r && S.chatKey?.p === originChat.p) {
+    S.keepChatFocus = true;   // keyboard stays up after sending, like iMessage
+    render();
+  }
 }
 /* The driver typed his location. What he MEANS is "come get me" — which is the
    Choose button. So offer that instead of scolding him, and show what choosing
@@ -1247,7 +1685,10 @@ function askBeforeSharing(body){
       <div class="faint" style="text-align:center; margin-top:10px">${T("You're never forced to share your spot early.")}</div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  localizeVisible(el);
+  makeControlsAccessible(el);
   document.body.appendChild(el);
+  setTimeout(() => el.querySelector('button,input,select,textarea')?.focus(), 20);
 }
 /* A company fishing for the location before it's theirs. Warn once, never block —
    and either way the server has already logged it for the admin queue. */
@@ -1256,18 +1697,19 @@ function warnBeforeAsking(body){
   el.className = 'modalwrap'; el.id = 'confirmWrap';
   el.innerHTML = `
     <div class="modal">
-      <h3>Hold off on asking where they are</h3>
-      <p>You get the exact pin, the mile marker and turn-by-turn directions the moment this
-         driver picks you — you don't need to ask for them.</p>
-      <p>${ic('warn',13)} Asking before you're chosen is against the RIGRX rules, and this
-         message will be flagged for review. Quote from the distance and drive time on the lead instead.</p>
+      <h3>${T('Hold off on asking where they are')}</h3>
+      <p>${T("You get the exact pin, the mile marker and turn-by-turn directions the moment this driver picks you — you don't need to ask for them.")}</p>
+      <p>${ic('warn',13)} ${T("Asking before you're chosen is against the RIGRX rules, and this message will be flagged for review. Quote from the distance and drive time on the lead instead.")}</p>
       <div class="acts">
-        <button class="btn ghost" onclick="sendAnyway()">Send anyway</button>
-        <button class="btn dark" onclick="closeConfirm()">Let me reword it</button>
+        <button class="btn ghost" onclick="sendAnyway()">${T('Send anyway')}</button>
+        <button class="btn dark" onclick="closeConfirm()">${T('Let me reword it')}</button>
       </div>
     </div>`;
   el.addEventListener('click', e => { if (e.target === el) closeConfirm(); });
+  localizeVisible(el);
+  makeControlsAccessible(el);
   document.body.appendChild(el);
+  setTimeout(() => el.querySelector('button,input,select,textarea')?.focus(), 20);
 }
 function sendAnyway(){
   closeConfirm();
@@ -1275,11 +1717,19 @@ function sendAnyway(){
   sendChat();
 }
 async function sendQuote(){
-  const amt = Math.round(parseFloat(qv('q-amt').replace(/[^0-9.]/g,'')) * 100);
+  const originView = S.view;
+  const originChat = { ...(S.chatKey || {}) };
+  const draftKey = formProgressKey(originView);
+  const draftRevision = Number(readFormProgressKey(draftKey)?.__revision || 0);
+  const amountInput = qv('q-amt');
+  const eta = qv('q-eta');
+  const amt = Math.round(parseFloat(amountInput.replace(/[^0-9.]/g,'')) * 100);
   if (!amt) return toast('Enter a dollar amount');
-  await api('POST', `/messages/${S.chatKey.r}/${S.chatKey.p}`, {
-    body: '', quote: { amount_cents: amt, eta: qv('q-eta'), note: '' } });
-  toast('Quote sent'); render();
+  await api('POST', `/messages/${originChat.r}/${originChat.p}`, {
+    body: '', quote: { amount_cents: amt, eta, note: '' } });
+  clearCommittedProgressFields(draftKey, { 'q-amt': amountInput, 'q-eta': eta }, draftRevision);
+  toast('Quote sent', true);
+  if (S.view === originView && S.chatKey?.r === originChat.r && S.chatKey?.p === originChat.p) render();
 }
 /* ---------------- provider onboarding ---------------- */
 /* ---- city type-ahead ----
@@ -1289,15 +1739,16 @@ async function sendQuote(){
 function cityPicker(id, placeholder){
   return `
   <div style="position:relative">
-    <input type="text" id="${id}" placeholder="${placeholder || T('Start typing a city — any US city works')}"
-      autocomplete="off" oninput="citySearch('${id}')">
-    <div id="${id}-list" class="citylist" style="display:none"></div>
+    <input type="text" id="${id}" value="${esc(S.pickedCity?.[id]?.label || '')}" placeholder="${placeholder || T('Start typing a city — any US city works')}"
+      autocomplete="off" aria-controls="${id}-list" oninput="citySearch('${id}')">
+    <div id="${id}-list" class="citylist" role="status" aria-live="polite" style="display:none"></div>
   </div>`;
 }
 let cityTimer = null;
 function citySearch(id){
   const box = $(id), list = $(id + '-list');
   delete (S.pickedCity || {})[id];
+  updateFormProgress({ [id]: box.value }, [`__city_${id}`]);
   clearTimeout(cityTimer);
   const q = box.value.trim();
   if (q.length < 2){ list.style.display = 'none'; return; }
@@ -1305,15 +1756,18 @@ function citySearch(id){
     let rows = [];
     try { rows = await api('GET', '/geo/cities?q=' + encodeURIComponent(q)); } catch(e){}
     list.innerHTML = rows.map(c =>
-      `<div class="cityopt" onclick='pickCity("${id}", ${JSON.stringify(c).replace(/'/g,"&#39;")})'>${ic('pin',12)} ${esc(c.label)}</div>`).join('')
+      `<button type="button" class="cityopt" onclick='pickCity("${id}", ${JSON.stringify(c).replace(/'/g,"&#39;")})'>${ic('pin',12)} ${esc(c.label)}</button>`).join('')
       || `<div class="cityopt muted">${T('No matching city — check the spelling')}</div>`;
     list.style.display = 'block';
   }, 180);
 }
 function pickCity(id, c){
+  const city = RIGRXFormProgress.normalizeCitySelection(c);
+  if (!city) return;
   S.pickedCity = S.pickedCity || {};
-  S.pickedCity[id] = c;
-  const box = $(id); if (box) box.value = c.label;
+  S.pickedCity[id] = city;
+  const box = $(id); if (box) box.value = city.label;
+  updateFormProgress({ [id]: city.label, [`__city_${id}`]: city });
   const list = $(id + '-list'); if (list) list.style.display = 'none';
 }
 
@@ -1328,10 +1782,11 @@ function pickTrade(el){
     const group = $('svc-' + catKey);
     if (!group) continue;
     [...group.querySelectorAll('.chip')].forEach(chip => {
-      if (items.includes(chip.textContent.trim())) chip.classList.add('sel');
+      if (items.includes(chip.dataset.v)) chip.classList.add('sel');
     });
+    saveFormSelection(group);
   }
-  toast(t.label + ' — typical services checked, adjust anything below');
+  toast(T('{trade} — typical services checked, adjust anything below', { trade: t.label }));
 }
 
 /* Yes/no flags that make matching precise without a long form. */
@@ -1350,24 +1805,26 @@ function vPSetup1(){
   return authShell(`
   ${isSetUpProvider() ? setupTop(null, null, 'p-settings') : ''}
   ${progress(1,5)}
-  <h2 class="scr">Tell us about your company</h2>
-  <p class="scrsub">Step 1 of 5 · leads start the day you're approved</p>
-  <label class="f">Business name</label><input type="text" id="po-name" value="${esc(p.name)}">
+  <h2 class="scr">${T('Tell us about your company')}</h2>
+  <p class="scrsub">${T("Step 1 of 5 · leads start the day you're approved")}</p>
+  <label class="f" for="po-name">${T('Business name')}</label><input type="text" id="po-name" autocomplete="organization" value="${esc(p.name)}">
   <div class="grid2">
-    <div><label class="f">Dispatch phone (text alerts)</label><input type="text" id="po-phone" value="${esc(p.dispatch_phone || S.me?.phone)}"></div>
-    <div><label class="f">After-hours phone</label><input type="text" id="po-after" value="${esc(p.after_phone)}"></div>
+    <div><label class="f" for="po-phone">${T('Dispatch phone (text alerts)')}</label><input type="tel" inputmode="tel" autocomplete="tel" id="po-phone" value="${esc(p.dispatch_phone || S.me?.phone)}"></div>
+    <div><label class="f" for="po-after">${T('After-hours phone')}</label><input type="tel" inputmode="tel" autocomplete="tel" id="po-after" value="${esc(p.after_phone)}"></div>
   </div>
-  <label class="f">Dispatch email</label><input type="text" id="po-email" value="${esc(p.email)}">
-  <label class="f">Hours</label>
-  <div class="chips" id="po-hours"><span class="chip ${p.hours!=='Scheduled'?'sel':''}" onclick="togOne(this)">24 / 7</span><span class="chip ${p.hours==='Scheduled'?'sel':''}" onclick="togOne(this)">Scheduled</span></div>
+  <label class="f" for="po-email">${T('Dispatch email')}</label><input type="email" inputmode="email" autocomplete="email" id="po-email" value="${esc(p.email)}">
+  <label class="f">${T('Hours')}</label>
+  <div class="chips" id="po-hours"><span class="chip ${p.hours!=='Scheduled'?'sel':''}" data-v="24 / 7" onclick="togOne(this)">${T('24 / 7')}</span><span class="chip ${p.hours==='Scheduled'?'sel':''}" data-v="Scheduled" onclick="togOne(this)">${T('Scheduled')}</span></div>
   <div style="height:16px"></div>
-  <button class="btn" onclick="savePSetup1()">Continue ${ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="savePSetup1()">${T('Continue')} ${ic('arrowR',15)}</button>`);
 }
 async function savePSetup1(){
-  if (!qv('po-name').trim()) return toast('Enter your business name');
+  if (firstInvalid([['po-name', qv('po-name').trim().length >= 2, T('Enter your business name')],
+    ['po-phone', /^\+?[\d\s().-]{7,}$/.test(qv('po-phone').trim()), T('Enter a valid dispatch phone')]])) return;
   S.provider = await api('PUT', '/provider/profile', {
     name: qv('po-name'), dispatch_phone: qv('po-phone'), after_phone: qv('po-after'),
     email: qv('po-email'), hours: selOf('po-hours')[0] || '24 / 7' });
+  clearFormProgress('p-setup1');
   await loadMe();
   nav('p-setup2');
 }
@@ -1378,28 +1835,28 @@ function vPSetup2(){
     ? setupTop('p-settings', 'Settings', 'p-feed')
     : setupTop('p-setup1', 'Back')}
   ${progress(2,5)}
-  <h2 class="scr">Locations & coverage</h2>
-  <p class="scrsub">Step 2 of 5 — you get every lead inside ANY location's radius</p>
+  <h2 class="scr">${T('Locations & coverage')}</h2>
+  <p class="scrsub">${T("Step 2 of 5 — you get every lead inside ANY location's radius")}</p>
   ${locs.map(l=>`
   <div class="card">
     <div class="row"><b class="mini k">${ic('pin',14)} ${esc(l.label)}</b>
-      <span style="display:inline-flex; align-items:center; gap:8px"><span class="pill red">${l.radius_mi} mi radius</span>
-      <a class="faint" onclick="delLocation(${l.id})">remove</a></span></div>
-  </div>`).join('') || '<div class="card alert"><div class="mini">Add at least one location — this is how leads find you.</div></div>'}
+      <span style="display:inline-flex; align-items:center; gap:8px"><span class="pill red">${T('{n} mi radius', { n: l.radius_mi })}</span>
+      <a class="faint" onclick="delLocation(${l.id})">${T('remove')}</a></span></div>
+  </div>`).join('') || `<div class="card alert"><div class="mini">${T('Add at least one location — this is how leads find you.')}</div></div>`}
   <div class="card" style="border-style:dashed">
-    <span class="sec">Add a location</span>
-    <label class="f">City / base</label>
-    ${cityPicker('loc-city', 'Start typing any US city — e.g. Amarillo, TX')}
+    <span class="sec">${T('Add a location')}</span>
+    <label class="f">${T('City / base')}</label>
+    ${cityPicker('loc-city', T('Start typing any US city — e.g. Amarillo, TX'))}
     <div class="grid2">
-      <div><label class="f">Label</label><input type="text" id="loc-label" placeholder="Bakersfield — HQ"></div>
-      <div><label class="f">Service radius (miles)</label><input type="text" id="loc-radius" inputmode="numeric" value="50">
-        <div class="faint" style="margin-top:5px">Up to 5,000 — set it wide if you roll long-distance</div></div>
+      <div><label class="f">${T('Label')}</label><input type="text" id="loc-label" placeholder="${T('Bakersfield — HQ')}"></div>
+      <div><label class="f">${T('Service radius (miles)')}</label><input type="text" id="loc-radius" inputmode="numeric" value="50">
+        <div class="faint" style="margin-top:5px">${T('Up to 5,000 — set it wide if you roll long-distance')}</div></div>
     </div>
-    <label class="f">Location phone (optional)</label><input type="text" id="loc-phone" placeholder="(661) 555-0000">
+    <label class="f">${T('Location phone (optional)')}</label><input type="text" id="loc-phone" placeholder="(661) 555-0000">
     <div style="height:10px"></div>
-    <button class="btn dark" onclick="addLocation()">+ Add location</button>
+    <button class="btn dark" onclick="addLocation()">${T('+ Add location')}</button>
   </div>
-  <button class="btn" onclick="${locs.length ? "nav('p-setup3')" : "toast('Add at least one location first')"}">Continue ${ic('arrowR',15)}</button>`, true);
+  <button class="btn" onclick="${locs.length ? "nav('p-setup3')" : "toast('Add at least one location first')"}">${T('Continue')} ${ic('arrowR',15)}</button>`, true);
 }
 async function addLocation(){
   const c = S.pickedCity?.['loc-city'];
@@ -1408,7 +1865,8 @@ async function addLocation(){
   await api('POST', '/provider/locations', {
     label: qv('loc-label') || c.label, lat: c.lat, lng: c.lng,
     radius_mi: radius, phone: qv('loc-phone') });
-  await loadMe(); toast('Location added — ' + radius + ' mi radius'); render();
+  clearFormProgress('p-setup2');
+  await loadMe(); toast(T('Location added — {radius} mi radius', { radius })); render();
 }
 async function delLocation(id){
   await api('DELETE', '/provider/locations/' + id);
@@ -1421,11 +1879,11 @@ function vPSetup3(){
     ? setupTop('p-settings', 'Settings', 'p-feed')
     : setupTop('p-setup2', 'Back')}
   ${progress(3,5)}
-  <h2 class="scr">What services do you offer?</h2>
-  <p class="scrsub">Step 3 of 5 — start with what kind of shop you are, then adjust. More boxes = more leads; your rating keeps it honest.</p>
+  <h2 class="scr">${T('What services do you offer?')}</h2>
+  <p class="scrsub">${T('Step 3 of 5 — start with what kind of shop you are, then adjust. More boxes = more leads; your rating keeps it honest.')}</p>
   <div class="card" style="border-color:var(--red)">
-    <span class="sec">What kind of company are you?</span>
-    <div class="faint" style="margin:6px 0 10px">This becomes your badge on RIGRX, and it checks the services that trade usually performs. Drivers can choose to send a request only to companies whose main work matches.</div>
+    <span class="sec">${T('What kind of company are you?')}</span>
+    <div class="faint" style="margin:6px 0 10px">${T('This becomes your badge on RIGRX, and it checks the services that trade usually performs. Drivers can choose to send a request only to companies whose main work matches.')}</div>
     <div class="chips" id="p-trade">
       ${(S.trades||[]).map(t=>`<span class="chip ${t.key===(S.provider?.primary_trade||'')?'sel':''}" data-key="${t.key}" onclick="pickTrade(this)">${ic(t.icon,14)} ${esc(t.label)}</span>`).join('')}
     </div>
@@ -1434,28 +1892,33 @@ function vPSetup3(){
   <div class="card">
     <span class="sec">${esc(c.label)}</span>
     <div class="chips" style="margin-top:9px" id="svc-${c.key}">
-      ${c.items.map(i=>`<span class="chip ${selectedFor(services, c).includes(i.label)?'sel':''}" onclick="tog(this)">${esc(i.label)}</span>`).join('')
-        || '<span class="faint">No services listed under this category yet</span>'}
+      ${c.items.map(i=>`<span class="chip ${selectedFor(services, c).includes(i.label)?'sel':''}" data-v="${esc(i.label)}" onclick="tog(this)">${esc(i.label)}</span>`).join('')
+        || `<span class="faint">${T('No services listed under this category yet')}</span>`}
     </div>
   </div>`).join('')}
   <div class="card" style="border-style:dashed">
-    <span class="sec">Something we didn't list?</span>
+    <span class="sec">${T("Something we didn't list?")}</span>
     <div class="row" style="margin-top:10px; gap:8px">
-      <input type="text" id="custom-svc" placeholder="e.g. Mobile alignment" style="flex:1">
-      <button class="btn dark" style="width:auto; padding:12px 16px" onclick="addCustomSvc()">Add</button>
+      <input type="text" id="custom-svc" placeholder="${T('e.g. Mobile alignment')}" style="flex:1">
+      <button class="btn dark" style="width:auto; padding:12px 16px" onclick="addCustomSvc()">${T('Add')}</button>
     </div>
     <div class="chips" style="margin-top:10px">
       ${(S.provider?.custom||[]).map(c=>`<span class="chip sel">${esc(c.name)} <span class="faint">(${c.status})</span></span>`).join('')}
     </div>
-    <div class="faint" style="margin-top:8px">Custom services go to RIGRX for approval, then join the catalog for everyone</div>
+    <div class="faint" style="margin-top:8px">${T('Custom services go to RIGRX for approval, then join the catalog for everyone')}</div>
   </div>
-  <button class="btn" onclick="savePSetup3()">Continue ${ic('arrowR',15)}</button>`, true);
+  <button class="btn" onclick="savePSetup3()">${T('Continue')} ${ic('arrowR',15)}</button>`, true);
 }
 async function addCustomSvc(){
   const name = qv('custom-svc').trim();
   if (!name) return;
+  const draftKey = formProgressKey('p-setup3');
+  const revision = Number(readFormProgressKey(draftKey)?.__revision || 0);
   await api('POST', '/provider/custom-service', { name });
-  await loadMe(); toast(`"${name}" added — pending RIGRX approval`); render();
+  await loadMe();
+  clearCommittedProgressFields(draftKey, { 'custom-svc': name }, revision);
+  toast(T('"{name}" added — pending RIGRX approval', { name }), true);
+  await render();
 }
 // Selections may still be stored under an old category label; read either.
 function selectedFor(services, cat){
@@ -1468,6 +1931,7 @@ async function savePSetup3(){
   const trade = $('p-trade')?.querySelector('.chip.sel')?.dataset.key || '';
   if (!trade) return toast('Pick what kind of company you are first');
   await api('PUT', '/provider/profile', { services, primary_trade: trade });
+  clearFormProgress('p-setup3');
   await loadMe();
   nav('p-setup4');
 }
@@ -1479,36 +1943,36 @@ function vPSetup4(){
     ? setupTop('p-settings', 'Settings', 'p-feed')
     : setupTop('p-setup3', 'Back')}
   ${progress(4,5)}
-  <h2 class="scr">Equipment & capacity</h2>
-  <p class="scrsub">Step 4 of 5 — drivers see this as proof you can handle the job</p>
+  <h2 class="scr">${T('Equipment & capacity')}</h2>
+  <p class="scrsub">${T('Step 4 of 5 — drivers see this as proof you can handle the job')}</p>
   <div class="card" style="margin-bottom:16px">
-    <span class="sec">Truck sizes you work on</span>
-    <div class="faint" style="margin:6px 0 10px">Pick every class you'll take. Leads outside your picks never reach you — and medium duty is a busy market most heavy-only shops skip.</div>
+    <span class="sec">${T('Truck sizes you work on')}</span>
+    <div class="faint" style="margin:6px 0 10px">${T("Pick every class you'll take. Leads outside your picks never reach you — and medium duty is a busy market most heavy-only shops skip.")}</div>
     <div class="chips" id="p-duty">
       ${(EQ().SERVED_CLASSES || []).map(d=>`<span class="chip ${(S.provider?.duty_classes || ['heavy','medium']).includes(d.key)?'sel':''}" data-k="${d.key}" onclick="tog(this)">${esc(d.label)}</span>`).join('')}
     </div>
   </div>
   <div class="grid2">
-    <div><label class="f">Heavy wreckers</label><input type="text" id="eq-wreckers" value="${esc(e.wreckers)}"></div>
-    <div><label class="f">Rotator</label><input type="text" id="eq-rotator" value="${esc(e.rotator)}" placeholder="No / Yes — 60 ton"></div>
+    <div><label class="f">${T('Heavy wreckers')}</label><input type="text" id="eq-wreckers" value="${esc(e.wreckers)}"></div>
+    <div><label class="f">${T('Rotator')}</label><input type="text" id="eq-rotator" value="${esc(e.rotator)}" placeholder="${T('No / Yes — 60 ton')}"></div>
   </div>
   <div class="grid2">
-    <div><label class="f">Service trucks</label><input type="text" id="eq-service" value="${esc(e.service)}"></div>
-    <div><label class="f">Landoll / traveling axle</label><input type="text" id="eq-landoll" value="${esc(e.landoll)}"></div>
+    <div><label class="f">${T('Service trucks')}</label><input type="text" id="eq-service" value="${esc(e.service)}"></div>
+    <div><label class="f">${T('Landoll / traveling axle')}</label><input type="text" id="eq-landoll" value="${esc(e.landoll)}"></div>
   </div>
   <div class="grid2">
-    <div><label class="f">Tire trucks</label><input type="text" id="eq-tire" value="${esc(e.tiretrucks)}"></div>
-    <div><label class="f">Fuel trucks</label><input type="text" id="eq-fuel" value="${esc(e.fueltrucks)}"></div>
+    <div><label class="f">${T('Tire trucks')}</label><input type="text" id="eq-tire" value="${esc(e.tiretrucks)}"></div>
+    <div><label class="f">${T('Fuel trucks')}</label><input type="text" id="eq-fuel" value="${esc(e.fueltrucks)}"></div>
   </div>
   <div class="card" style="margin-top:18px">
-    <span class="sec">What can you take on?</span>
-    <div class="faint" style="margin:6px 0 10px">Seven quick answers that send you the right leads and keep the wrong ones away.</div>
+    <span class="sec">${T('What can you take on?')}</span>
+    <div class="faint" style="margin:6px 0 10px">${T('Seven quick answers that send you the right leads and keep the wrong ones away.')}</div>
     <div class="chips" id="p-caps">
-      ${CAPS.map(([k,label])=>`<span class="chip ${c[k]?'sel':''}" data-k="${k}" onclick="tog(this)">${label}</span>`).join('')}
+      ${CAPS.map(([k,label])=>`<span class="chip ${c[k]?'sel':''}" data-k="${k}" onclick="tog(this)">${T(label)}</span>`).join('')}
     </div>
   </div>
   <div style="height:8px"></div>
-  <button class="btn" onclick="savePSetup4()">Continue ${ic('arrowR',15)}</button>`);
+  <button class="btn" onclick="savePSetup4()">${T('Continue')} ${ic('arrowR',15)}</button>`);
 }
 async function savePSetup4(){
   const caps = {};
@@ -1520,6 +1984,7 @@ async function savePSetup4(){
   await api('PUT', '/provider/profile', { capabilities: caps, duty_classes: duty, equipment: {
     wreckers: qv('eq-wreckers'), rotator: qv('eq-rotator'), service: qv('eq-service'),
     landoll: qv('eq-landoll'), tiretrucks: qv('eq-tire'), fueltrucks: qv('eq-fuel') } });
+  clearFormProgress('p-setup4');
   await loadMe();
   nav('p-setup5');
 }
@@ -1530,21 +1995,23 @@ function vPSetup5(){
     ? setupTop('p-settings', 'Settings', 'p-feed')
     : setupTop('p-setup4', 'Back')}
   ${progress(5,5)}
-  <h2 class="scr">Verification & billing</h2>
-  <p class="scrsub">Step 5 of 5 — drivers trust RIGRX because every company is vetted</p>
-  <label class="f">Business / tow license #</label>
+  <h2 class="scr">${T('Verification & billing')}</h2>
+  <p class="scrsub">${T('Step 5 of 5 — drivers trust RIGRX because every company is vetted')}</p>
+  <label class="f">${T('Business / tow license #')}</label>
   <input type="text" id="vf-license" value="${esc(v.license)}" placeholder="CA-TOW-88412">
-  <label class="f">Certificate of insurance (PDF or photo) <span style="text-transform:none; letter-spacing:0; font-weight:500">— optional, needed for the LICENSED badge</span></label>
-  <label class="chip dashed" style="cursor:pointer; display:inline-flex">${v.coi_file ? '✓ Uploaded — replace' : '+ Upload COI'}<input type="file" style="display:none" onchange="uploadDoc(this,'coi_file')"></label>
-  <label class="f">W-9 (PDF or photo) <span style="text-transform:none; letter-spacing:0; font-weight:500">— optional, needed for the LICENSED badge</span></label>
-  <label class="chip dashed" style="cursor:pointer; display:inline-flex">${v.w9_file ? '✓ Uploaded — replace' : '+ Upload W-9'}<input type="file" style="display:none" onchange="uploadDoc(this,'w9_file')"></label>
+  <label class="f">${T('Certificate of insurance (PDF or photo)')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('— optional, needed for the LICENSED badge')}</span></label>
+  <input id="vf-coi" class="sr-only" type="file" accept="image/*,.pdf" onchange="uploadDoc(this,'coi_file')">
+  <label class="chip dashed" for="vf-coi" style="cursor:pointer; display:inline-flex">${T(v.coi_file ? '✓ Uploaded — replace' : '+ Upload COI')}</label>
+  <label class="f">${T('W-9 (PDF or photo)')} <span style="text-transform:none; letter-spacing:0; font-weight:500">${T('— optional, needed for the LICENSED badge')}</span></label>
+  <input id="vf-w9" class="sr-only" type="file" accept="image/*,.pdf" onchange="uploadDoc(this,'w9_file')">
+  <label class="chip dashed" for="vf-w9" style="cursor:pointer; display:inline-flex">${T(v.w9_file ? '✓ Uploaded — replace' : '+ Upload W-9')}</label>
   <div class="card alert" style="margin-top:16px">
-    <div class="mini" style="line-height:1.55">${ic('card',13)} <b class="k">Card on file:</b> ${S.simulatedPayments ? 'payments are in simulation mode until Stripe keys are added — no card needed to test.' : 'you will be asked for a card before your first lead purchase.'}</div>
+    <div class="mini" style="line-height:1.55">${ic('card',13)} <b class="k">${T('Card on file:')}</b> ${T(S.simulatedPayments ? 'payments are in simulation mode until Stripe keys are added — no card needed to test.' : 'you will be asked for a card before your first lead purchase.')}</div>
   </div>
   <div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('clock',13)} Your account goes to <b class="k">RIGRX review</b> (usually same day). You can browse masked leads right away — buying unlocks once you're approved.</div>
+    <div class="mini" style="line-height:1.55">${ic('clock',13)} ${T("Your account goes to RIGRX review (usually same day). You can browse masked leads right away — buying unlocks once you're approved.")}</div>
   </div>
-  <button class="btn" onclick="savePSetup5()">${ic('check',16)} Submit & open my dashboard</button>`);
+  <button class="btn" onclick="savePSetup5()">${ic('check',16)} ${T('Submit & open my dashboard')}</button>`);
 }
 async function uploadDoc(input, key){
   if (!input.files[0]) return;
@@ -1552,8 +2019,7 @@ async function uploadDoc(input, key){
   const res = await fetch('/api/upload', { method: 'POST', body: fd });
   const data = await res.json();
   if (data.url){
-    const v = { ...(S.provider?.verification || {}), [key]: data.url };
-    await api('PUT', '/provider/profile', { verification: v });
+    await api('PUT', '/provider/profile', { verification: { [key]: data.url } });
     await loadMe(); toast('Uploaded'); render();
   }
 }
@@ -1561,34 +2027,35 @@ async function savePSetup5(){
   const v = { ...(S.provider?.verification || {}), license: qv('vf-license') };
   await api('PUT', '/provider/profile', { verification: v });
   await loadMe();
-  toast('Application submitted — pending RIGRX approval');
+  clearFormProgress('p-setup5');
+  toast('Application submitted — pending RIGRX approval', true);
   nav('p-feed');
 }
 
 /* ---------------- provider app ---------------- */
 function pendingBanner(approved){
   return approved ? '' : `<div class="card alert">
-    <div class="mini k">${ic('clock',14)} Account pending RIGRX approval — you can browse masked leads, but buying unlocks after approval.</div></div>`;
+    <div class="mini k">${ic('clock',14)} ${T('Account pending RIGRX approval — you can browse masked leads, but buying unlocks after approval.')}</div></div>`;
 }
 async function vPFeed(){
   const d = await api('GET', '/leads');
   return `
-  <h2 class="scr">Live Leads</h2>
-  <p class="scrsub">Open requests inside your coverage that match your services</p>
+  <h2 class="scr">${T('Live Leads')}</h2>
+  <p class="scrsub">${T('Open requests inside your coverage that match your services')}</p>
   ${pendingBanner(d.approved)}
   ${(S.provider?.lead_credits || 0) > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
-    <div class="mini" style="color:#14603a; line-height:1.5"><b class="k" style="color:#14603a">${S.provider.lead_credits} free lead${S.provider.lead_credits===1?'':'s'} on your account</b> — unlocking a lead uses one automatically. No charge.</div>
+    <div class="mini" style="color:#14603a; line-height:1.5"><b class="k" style="color:#14603a">${TN(S.provider.lead_credits, '{n} free lead on your account', '{n} free leads on your account')}</b> — ${T('unlocking a lead uses one automatically. No charge.')}</div>
   </div>` : ''}
   ${d.approved && !d.license_verified ? `<div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Your license isn't verified yet.</b>
-    ${d.missed_licensed_leads ? `You missed <b class="k">${d.missed_licensed_leads} lead${d.missed_licensed_leads===1?'':'s'}</b> this week from drivers who asked for licensed companies only.` : 'Some drivers request licensed companies only, and those leads stay hidden from you.'}
-    Add your license number and insurance in <a onclick="nav('p-setup5')">Settings</a> and RIGRX will review it.</div>
+    <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">${T("Your license isn't verified yet.")}</b>
+    ${d.missed_licensed_leads ? T('You missed {n} this week from drivers who asked for licensed companies only.', { n: TN(d.missed_licensed_leads, '{n} lead', '{n} leads') }) : T('Some drivers request licensed companies only, and those leads stay hidden from you.')}
+    ${T('Add your license number and insurance in Settings and RIGRX will review it.')}</div>
   </div>` : ''}
   ${d.leads.length ? `<div class="cols2"><div>` +
     d.leads.filter((_,i)=>i%2===0).map(leadCard).join('') + `</div><div>` +
     d.leads.filter((_,i)=>i%2===1).map(leadCard).join('') +
-    `<div class="card" style="border-style:dashed; text-align:center"><span class="faint">${ic('mobile',12)} text + ${ic('bell',12)} live alert the second a matching lead drops</span></div></div></div>`
-  : `<div class="card" style="text-align:center; padding:26px"><span class="muted">${ic('clock',14)} No open leads in your area right now.<br><span class="faint">You'll get a text the moment one drops. Widen your radius or add services in Settings to see more.</span></span></div>`}`;
+    `<div class="card" style="border-style:dashed; text-align:center"><span class="faint">${ic('mobile',12)} ${T('text')} + ${ic('bell',12)} ${T('live alert the second a matching lead drops')}</span></div></div></div>`
+  : `<div class="card" style="text-align:center; padding:26px"><span class="muted">${ic('clock',14)} ${T('No open leads in your area right now.')}<br><span class="faint">${T("You'll get a text the moment one drops. Widen your radius or add services in Settings to see more.")}</span></span></div>`}`;
 }
 // A one-word size badge so a heavy-only shop can tell at a glance what rolled in
 function dutyPill(cls){
@@ -1599,15 +2066,15 @@ function dutyPill(cls){
 function leadCard(l){
   return `<div class="lead" onclick="nav('p-lead',{leadId:${l.id}})">
     <div class="row"><span class="ty">${ic(svcIcon(l.service_key))} ${esc(l.service_label)}</span><span class="pill ${l.slots.total===0?'solid':'gray'}">${timeAgo(l.created_at)}</span></div>
-    <div class="mini" style="margin:8px 0 3px">${dutyPill(l.duty_class)}${esc(l.truck_class)} + <b class="k">${esc(l.trailer_type)}${l.hazmat ? ' (hazmat)' : ''}</b> · ${l.can_move==='no' ? "can't move" : 'can move'}</div>
+    <div class="mini" style="margin:8px 0 3px">${dutyPill(l.duty_class)}${esc(l.truck_class)} + <b class="k">${esc(l.trailer_type)}${l.hazmat ? ' ('+T('hazmat')+')' : ''}</b> · ${T(l.can_move==='no' ? "can't move" : 'can move')}</div>
     ${l.tire_position ? `<div class="mini" style="margin:3px 0"><b class="k" style="color:var(--red)">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b>${l.tire_position.size ? ' — '+esc(l.tire_position.size) : ''}${l.tire_position.problem ? ' · '+esc(l.tire_position.problem) : ''}</div>` : ''}
     ${(l.spec||[]).length ? `<div class="faint" style="margin:3px 0">${l.spec.slice(0,3).map(x=>esc(x.k)+': '+esc(x.v)).join(' · ')}</div>` : ''}
-    <div class="muted mini">${ic('pin',12)} ${esc(l.area_label)} · <b class="k">${l.band} from you</b></div>
+    <div class="muted mini">${ic('pin',12)} ${esc(l.area_label)} · <b class="k">${T('{band} from you', { band: l.band })}</b></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<l.slots.standard?'f':''}"></i>`).join('')}<i class="${l.slots.total>3?'p':''}" style="${l.premium||l.slots.total>3?'':'opacity:.5'}"></i></div>
     <div class="row" style="margin-top:10px">
-      ${l.purchased ? `<span class="pill solid">YOURS</span><span class="unlockprice">Open ›</span>`
-        : l.premium ? `<span class="pill dark">SOLD OUT — PREMIUM OPEN</span><span class="unlockprice" style="color:var(--ink)">Force in ${fmt$(l.price_cents)} ›</span>`
-        : `<span class="pill red">${l.slots.standardLeft} of 3 slots left</span><span class="unlockprice">Unlock ${fmt$(l.price_cents)} ›</span>`}
+      ${l.purchased ? `<span class="pill solid">${T('YOURS')}</span><span class="unlockprice">${T('Open')} ›</span>`
+        : l.premium ? `<span class="pill dark">${T('SOLD OUT — PREMIUM OPEN')}</span><span class="unlockprice" style="color:var(--ink)">${T('Force in {price}', { price: fmt$(l.price_cents) })} ›</span>`
+        : `<span class="pill red">${T('{n} of 3 slots left', { n: l.slots.standardLeft })}</span><span class="unlockprice">${T('Unlock {price}', { price: fmt$(l.price_cents) })} ›</span>`}
     </div>
   </div>`;
 }
@@ -1615,34 +2082,34 @@ async function vPLead(){
   const l = await api('GET', '/leads/' + S.leadId);
   const full = l.full;
   return `
-  <button class="back" onclick="nav('p-feed')">${ic('chevL',15)} All leads</button>
+  <button class="back" onclick="nav('p-feed')">${ic('chevL',15)} ${T('All leads')}</button>
   <div class="row" style="margin-top:8px"><h2 class="scr" style="margin:0; display:flex; align-items:center; gap:8px">${ic(svcIcon(l.service_key),21)} Lead #${l.id}</h2>
-    ${l.purchased ? '<span class="pill solid">UNLOCKED</span>' : ''}</div>
-  <p class="scrsub" style="margin-top:4px">${esc(l.service_label)} · posted ${timeAgo(l.created_at)} ·
-    ${l.purchased ? 'respond fast to win the job' : l.premium ? '<b style="color:var(--ink)">premium slot only</b>' : `<b style="color:var(--red)">${l.slots.standardLeft} of 3 slots left</b>`}</p>
+    ${l.purchased ? `<span class="pill solid">${T('UNLOCKED')}</span>` : ''}</div>
+  <p class="scrsub" style="margin-top:4px">${esc(l.service_label)} · ${T('posted')} ${timeAgo(l.created_at)} ·
+    ${l.purchased ? T('respond fast to win the job') : l.premium ? `<b style="color:var(--ink)">${T('premium slot only')}</b>` : `<b style="color:var(--red)">${T('{n} of 3 slots left', { n: l.slots.standardLeft })}</b>`}</p>
   <div class="cols2"><div>
   <div class="card">
     <div class="mini listline">
-      <span class="muted">Rig</span> &nbsp;${dutyPill(l.duty_class)}${esc(l.truck_class)} + ${esc(l.trailer_type)}<br>
-      <span class="muted">Hazmat</span> &nbsp;${l.hazmat ? `<span style="color:var(--red);font-weight:700">Yes — Class ${esc(l.hazmat_info?.class)}, UN ${esc(l.hazmat_info?.un)}</span>` : 'No'}<br>
-      <span class="muted">Mobility</span> &nbsp;${l.can_move==='no' ? "Can't move under own power" : l.can_move==='short' ? 'Can limp a short distance' : 'Can move'}<br>
-      <span class="muted">Area</span> &nbsp;${esc(l.area_label)}<br>
-      ${l.direction ? `<span class="muted">Heading</span> &nbsp;<b class="k">${esc(l.direction)}</b><br>` : ''}
-      <span class="muted">Situation</span> &nbsp;${(l.situation||[]).map(esc).join(' · ') || '—'}<br>
-      <span class="muted">Driver rating</span> &nbsp;${l.driver_rating ? star5(Math.round(l.driver_rating)) + ' ' + l.driver_rating + ' as rated by providers' : 'New driver'}
+      <span class="muted">${T('Rig')}</span> &nbsp;${dutyPill(l.duty_class)}${esc(l.truck_class)} + ${esc(l.trailer_type)}<br>
+      <span class="muted">${T('Hazmat')}</span> &nbsp;${l.hazmat ? `<span style="color:var(--red);font-weight:700">${T('Yes — Class {class}, UN {un}', { class: esc(l.hazmat_info?.class), un: esc(l.hazmat_info?.un) })}</span>` : T('No')}<br>
+      <span class="muted">${T('Mobility')}</span> &nbsp;${T(l.can_move==='no' ? "Can't move under own power" : l.can_move==='short' ? 'Can limp a short distance' : 'Can move')}<br>
+      <span class="muted">${T('Area')}</span> &nbsp;${esc(l.area_label)}<br>
+      ${l.direction ? `<span class="muted">${T('Heading')}</span> &nbsp;<b class="k">${esc(l.direction)}</b><br>` : ''}
+      <span class="muted">${T('Situation')}</span> &nbsp;${(l.situation||[]).map(esc).join(' · ') || '—'}<br>
+      <span class="muted">${T('Driver rating')}</span> &nbsp;${l.driver_rating ? star5(Math.round(l.driver_rating)) + ' ' + T('{rating} as rated by providers', { rating: l.driver_rating }) : T('New driver')}
     </div>
   </div>
   ${l.tire_position ? `<div class="card" style="border-color:var(--red)">
-    <span class="sec">${ic('tire',13)} The failed tire</span>
+    <span class="sec">${ic('tire',13)} ${T('The failed tire')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Position</span> &nbsp;<b class="k">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b><br>
-      <span class="muted">Size</span> &nbsp;<b class="k">${esc(l.tire_position.size || 'not on file')}</b><br>
-      ${l.tire_position.wheel ? `<span class="muted">Wheel</span> &nbsp;${esc(l.tire_position.wheel)}<br>` : ''}
-      <span class="muted">Problem</span> &nbsp;${esc(l.tire_position.problem || '—')}
+      <span class="muted">${T('Position')}</span> &nbsp;<b class="k">${esc([l.tire_position.axle, l.tire_position.side, l.tire_position.position].filter(x=>x && x!=='Single').join(' · '))}</b><br>
+      <span class="muted">${T('Size')}</span> &nbsp;<b class="k">${l.tire_position.size ? esc(l.tire_position.size) : T('not on file')}</b><br>
+      ${l.tire_position.wheel ? `<span class="muted">${T('Wheel')}</span> &nbsp;${esc(l.tire_position.wheel)}<br>` : ''}
+      <span class="muted">${T('Problem')}</span> &nbsp;${esc(l.tire_position.problem || '—')}
     </div>
   </div>` : ''}
   ${(l.spec||[]).length ? `<div class="card">
-    <span class="sec">Equipment on this rig</span>
+    <span class="sec">${T('Equipment on this rig')}</span>
     <div class="mini listline" style="margin-top:6px">
       ${l.spec.map(x=>`<span class="muted">${esc(x.k)}</span> &nbsp;${esc(x.v)}`).join('<br>')}
     </div>
@@ -1654,49 +2121,50 @@ async function vPLead(){
     <div class="divider"></div>
     <div class="mini listline">
       ${full.won ? `
-        <span class="muted">Exact spot</span> &nbsp;<b class="k">${esc(full.landmark || (full.lat.toFixed(4)+', '+full.lng.toFixed(4)))}</b><br>
+        <span class="muted">${T('Exact spot')}</span> &nbsp;<b class="k">${esc(full.landmark || (full.lat.toFixed(4)+', '+full.lng.toFixed(4)))}</b><br>
+        ${full.location_source === 'manual' ? `<span style="color:var(--red)">${ic('warn',12)} ${T('Approximate town entered manually — confirm the landmark with the driver.')}</span><br>` : ''}
 `
       : `
-        <span class="muted">Distance</span> &nbsp;<b class="k">${full.distance_mi != null ? full.distance_mi + ' mi · about ' + full.eta_min + ' min' : 'add a location in Settings'}</b><br>
-        <span class="muted">Exact spot</span> &nbsp;<span style="color:var(--muted)">${ic('lock',12)} unlocks if the driver picks you</span><br>`}
-      <span class="muted">Problem</span> &nbsp;"${esc(full.description || '—')}"<br>
-      <span class="muted">Truck</span> &nbsp;${esc([full.truck.year, full.truck.make, full.truck.model, full.truck.engine, full.truck.color].filter(Boolean).join(' · ') || '—')}<br>
-      <span class="muted">Trailer</span> &nbsp;${esc([full.trailer.type, full.trailer.len].filter(Boolean).join(' · ') || '—')}<br>
-      <span class="muted">Photos</span> &nbsp;${(full.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">${ic('camera',13)} view</a>`).join(' · ') || 'none'}
+        <span class="muted">${T('Distance')}</span> &nbsp;<b class="k">${full.distance_mi != null ? T('{miles} mi · about {minutes} min', { miles: full.distance_mi, minutes: full.eta_min }) : T('add a location in Settings')}</b><br>
+        <span class="muted">${T('Exact spot')}</span> &nbsp;<span style="color:var(--muted)">${ic('lock',12)} ${T('unlocks if the driver picks you')}</span><br>`}
+      <span class="muted">${T('Problem')}</span> &nbsp;"${esc(full.description || '—')}"<br>
+      <span class="muted">${T('Truck')}</span> &nbsp;${esc([full.truck.year, full.truck.make, full.truck.model, full.truck.engine, full.truck.color].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">${T('Trailer')}</span> &nbsp;${esc([full.trailer.type, full.trailer.len].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">${T('Photos')}</span> &nbsp;${(full.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">${ic('camera',13)} ${T('view')}</a>`).join(' · ') || T('none')}
     </div>
     ${full.won ? `<div class="divider"></div>${directions(full.lat, full.lng)}`
       : `<div class="divider"></div><div class="faint" style="line-height:1.5">${ic('lock',12)} You have the driver and the distance so you can quote accurately. The exact pin and mile marker unlock the moment they choose you — that keeps four trucks from rolling to the same breakdown.</div>`}
   </div>` : `
   <div class="card">
-    <span class="sec">${ic('lock',13)} Unlocks when you buy</span>
+    <span class="sec">${ic('lock',13)} ${T('Unlocks when you buy')}</span>
     <div class="mini locked" style="margin-top:9px; line-height:1.8">
-      Driver name & direct phone number<br>
-      Exact GPS pin + landmark / mile marker<br>
-      Full truck & trailer specs + photos<br>
-      Instant in-app chat with the driver
+      ${T('Driver name & direct phone number')}<br>
+      ${T('Exact GPS pin + landmark / mile marker')}<br>
+      ${T('Full truck & trailer specs + photos')}<br>
+      ${T('Instant in-app chat with the driver')}
     </div>
   </div>`}
   </div><div>
   ${full ? `
-  <button class="btn" onclick="openThread(${l.id}, ${S.me.company_id || S.me.id}, 'p-myleads')">${ic('chat',16)} Message the driver now</button>
+  <button class="btn" onclick="openThread(${l.id}, ${S.me.company_id || S.me.id}, 'p-myleads')">${ic('chat',16)} ${T('Message the driver now')}</button>
   <div style="height:8px"></div>
-  ${l.selected_provider === S.me.id ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
+  ${l.selected_provider === S.me.id ? `<div class="card alert"><b class="mini k">${T('The driver chose YOU for this job')}</b></div>` : ''}
   ` : `
-  <div class="card alert"><div class="mini" style="line-height:1.55">${ic('zap',13)} First 3 buyers get this lead at the standard price. After that, one final <b class="k">premium slot</b> at 2×. Max 4 companies ever see this driver's info.</div></div>
+  <div class="card alert"><div class="mini" style="line-height:1.55">${ic('zap',13)} ${T('Three standard buyers pay the listed price. One final premium buyer may force in at 2×; no more than four companies ever receive this driver’s identity. RIGRX approval is reviewed by our team, while license status comes from the document the company provided. If the driver cannot be reached, the purchase is eligible for refund review.')}</div></div>
   ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
-    <div class="mini" style="line-height:1.5; color:#14603a"><b class="k" style="color:#14603a">${l.my_credits} free lead${l.my_credits===1?'':'s'} on your account.</b> This unlock uses one — your card is not touched.</div>
+    <div class="mini" style="line-height:1.5; color:#14603a"><b class="k" style="color:#14603a">${TN(l.my_credits, '{n} free lead on your account.', '{n} free leads on your account.')}</b> ${T('This unlock uses one — your card is not touched.')}</div>
   </div>` : ''}
   ${S.provider && !S.provider.approved ? `
   <div class="card" style="border-color:var(--red)">
-    <div class="mini" style="line-height:1.55">${ic('clock',14)} <b class="k">Pending RIGRX approval.</b> You can browse masked leads now; buying unlocks the moment you're approved — usually within a day. Questions? Reply to your signup text.</div>
+    <div class="mini" style="line-height:1.55">${ic('clock',14)} <b class="k">${T('Pending RIGRX approval.')}</b> ${T("You can browse masked leads now; buying unlocks the moment you're approved — usually within a day.")}</div>
   </div>
-  <button class="btn big" disabled>${ic('lock',17)} UNLOCK LEAD — ${fmt$(l.price_cents)}</button>` : `
-  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? `UNLOCK FREE — 1 CREDIT` : `${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}`}</button>`}
-  <div class="faint" style="text-align:center; margin-top:9px">${l.my_credits > 0 ? 'No charge — you have free leads left' : S.simulatedPayments ? 'Payment simulation mode — no real charge' : ic('card',12) + ' Charged to your card on file'} · unreachable-driver refund policy applies</div>`}
+  <button class="btn big" disabled>${ic('lock',17)} ${T('UNLOCK LEAD')} — ${fmt$(l.price_cents)}</button>` : `
+  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? T('UNLOCK FREE — 1 CREDIT') : `${T(l.premium ? 'FORCE IN' : 'UNLOCK LEAD')} — ${fmt$(l.price_cents)}`}</button>`}
+  <div class="faint" style="text-align:center; margin-top:9px">${l.my_credits > 0 ? T('No charge — one lead credit will be used') : S.simulatedPayments ? T('Payment simulation mode — no real charge') : ic('card',12) + ' ' + T('The exact listed amount is charged to your card on file')} · ${T('Unreachable-driver purchases are reviewed under the refund policy')}</div>`}
   </div></div>`;
 }
 async function buyLead(btn){
-  btn.disabled = true; btn.textContent = 'Processing…';
+  btn.disabled = true; btn.textContent = T('Processing…');
   try {
     const res = await api('POST', `/leads/${S.leadId}/buy`);
     toast(res.paid_with === 'credit'
@@ -1719,20 +2187,20 @@ async function vPMyLeads(){
                   'spend': ['Lead spend', 'Every purchase, newest first'] };
   const h = heads[f] || heads[''];
   return `
-  ${f ? `<button class="back" onclick="nav('p-stats')">${ic('chevL',15)} Stats</button>` : ''}
-  <h2 class="scr">${h[0]}</h2>
-  <p class="scrsub">${h[1]}</p>
-  ${f ? `<div class="tiles"><div class="tile"><div class="l">Showing</div><div class="v">${shown.length}</div>
-      <div class="d">of ${rows.length} lead${rows.length===1?'':'s'} bought</div></div>
-    <div class="tile"><div class="l">Spent on these</div><div class="v">${fmt$(spent)}</div></div></div>` : ''}
+  ${f ? `<button class="back" onclick="nav('p-stats')">${ic('chevL',15)} ${T('Stats')}</button>` : ''}
+  <h2 class="scr">${T(h[0])}</h2>
+  <p class="scrsub">${T(h[1])}</p>
+  ${f ? `<div class="tiles"><div class="tile"><div class="l">${T('Showing')}</div><div class="v">${shown.length}</div>
+      <div class="d">${TN(rows.length, 'of {n} lead bought', 'of {n} leads bought')}</div></div>
+  <div class="tile"><div class="l">${T('Spent on these')}</div><div class="v">${fmt$(spent)}</div></div></div>` : ''}
   ${shown.map(x=>`<div class="card click" onclick="nav('p-lead',{leadId:${x.request_id}})">
-    <div class="row"><div><b class="mini k">Lead #${x.request_id} — ${esc(x.service_label)}</b>
-      <div class="faint">${esc(x.area_label)} · bought ${timeAgo(x.created_at)} · ${fmt$(x.amount_cents)}${x.premium ? ' (premium)' : ''}${x.refunded ? ' · REFUNDED' : ''}</div></div>
-    <span class="pill ${x.won ? 'solid' : x.request_status==='open' ? 'red' : 'gray'}">${x.won ? 'WON' : esc(x.request_status)}</span></div>
+    <div class="row"><div><b class="mini k">${T('Lead #')}${x.request_id} — ${esc(x.service_label)}</b>
+      <div class="faint">${esc(x.area_label)} · ${T('bought')} ${timeAgo(x.created_at)} · ${fmt$(x.amount_cents)}${x.premium ? ' ('+T('premium')+')' : ''}${x.refunded ? ' · '+T('REFUNDED') : ''}</div></div>
+    <span class="pill ${x.won ? 'solid' : x.request_status==='open' ? 'red' : 'gray'}">${T(x.won ? 'WON' : x.request_status)}</span></div>
   </div>`).join('') || `<div class="card" style="text-align:center"><span class="muted">${
-      f === 'won' ? "No wins yet — chat fast and quote clearly, that's what gets you chosen"
+      T(f === 'won' ? "No wins yet — chat fast and quote clearly, that's what gets you chosen"
     : f === 'open' ? 'Nothing open right now'
-    : 'No leads purchased yet — check Live Leads'}</span></div>`}`;
+    : 'No leads purchased yet — check Live Leads')}</span></div>`}`;
 }
 /* ---------------- directions ---------------- */
 // Hand navigation off to whatever the person already uses rather than routing trucks
@@ -1772,7 +2240,7 @@ function directions(lat, lng, opts = {}){
 function copyCoords(text){
   navigator.clipboard?.writeText(text).then(
     () => toast(T('Coordinates copied')),
-    () => toast(text));
+    () => toast(text, false, false));
 }
 
 /* ---------------- company people & jobs ---------------- */
@@ -1785,74 +2253,79 @@ const ROLE_LABEL = { owner: 'Owner', dispatcher: 'Dispatcher', tech: 'Technician
 async function vPPeople(){
   const rows = await api('GET', '/provider/members');
   const locs = S.provider?.locations || [];
-  const locOpts = ['<option value="">Any yard</option>'].concat(
-    locs.map(l=>`<option value="${l.id}">${esc(l.label || 'Yard ' + l.id)}</option>`)).join('');
+  const locOpts = [`<option value="">${T('Any yard')}</option>`].concat(
+    locs.map(l=>`<option value="${l.id}">${esc(l.label || T('Yard {id}', { id: l.id }))}</option>`)).join('');
   return `
-  <h2 class="scr">Your team</h2>
-  <p class="scrsub">Everyone signs in with their own mobile number — no passwords to hand out or reset</p>
+  <h2 class="scr">${T('Your team')}</h2>
+  <p class="scrsub">${T('Everyone signs in with their own mobile number — no passwords to hand out or reset')}</p>
   ${isOwner() ? `
   <div class="card">
-    <span class="sec">Add someone</span>
+    <span class="sec">${T('Add someone')}</span>
     <div class="grid2" style="margin-top:8px">
-      <div><label class="f" style="margin-top:0">Name</label><input type="text" id="mb-name" placeholder="Dale Prescott"></div>
-      <div><label class="f" style="margin-top:0">Mobile number</label><input type="tel" id="mb-phone" placeholder="(661) 555-0134"></div>
+      <div><label class="f" style="margin-top:0">${T('Name')}</label><input type="text" id="mb-name" placeholder="Dale Prescott"></div>
+      <div><label class="f" style="margin-top:0">${T('Mobile number')}</label><input type="tel" id="mb-phone" placeholder="(661) 555-0134"></div>
     </div>
     <div class="grid2">
-      <div><label class="f">Role</label>
+      <div><label class="f">${T('Role')}</label>
         <select id="mb-role">
-          <option value="tech">Technician — sees only the jobs you give them</option>
-          <option value="dispatcher">Dispatcher — gets lead alerts and hands work out</option>
+          <option value="tech">${T('Technician — sees only the jobs you give them')}</option>
+          <option value="dispatcher">${T('Dispatcher — gets lead alerts and hands work out')}</option>
         </select></div>
-      <div><label class="f">Yard</label><select id="mb-loc">${locOpts}</select></div>
+      <div><label class="f">${T('Yard')}</label><select id="mb-loc">${locOpts}</select></div>
     </div>
     <div class="grid2">
-      <div><label class="f">Their language</label>
+      <div><label class="f">${T('Their language')}</label>
         <select id="mb-lang">
-          <option value="en">English</option>
-          <option value="es">Español (Spanish)</option>
+          <option value="en">${T('English')}</option>
+          <option value="es">${T('Español (Spanish)')}</option>
         </select>
-        <div class="faint" style="margin-top:6px">Their invite text and app arrive in this language. They can change it themselves later.</div>
+        <div class="faint" style="margin-top:6px">${T('Their invite text and app arrive in this language. They can change it themselves later.')}</div>
       </div>
     </div>
-    <div class="faint" style="margin:10px 0">A dispatcher tied to a yard is only alerted for leads near that yard. Leave it on "Any yard" to hear about everything.</div>
-    <button class="btn" onclick="addMember()">${ic('plus',16)} Add to team &amp; text them the link</button>
+    <div class="faint" style="margin:10px 0">${T('A dispatcher tied to a yard is only alerted for leads near that yard. Leave it on "Any yard" to hear about everything.')}</div>
+    <button class="btn" onclick="addMember()">${ic('plus',16)} ${T('Add to team & text them the link')}</button>
   </div>` : ''}
 
   ${rows.filter(m=>!m.archived_at).map(m=>`
     <div class="card">
       <div class="row"><div>
         <b class="mini k">${esc(m.name || m.phone)}</b>
-        <span class="pill ${m.member_role==='owner'?'solid':m.member_role==='dispatcher'?'red':'gray'}" style="margin-left:6px">${ROLE_LABEL[m.member_role] || m.member_role}</span>
-        <div class="faint" style="margin-top:3px">${esc(m.phone)}${m.location_label ? ' · ' + esc(m.location_label) : ' · any yard'}${m.assignable ? ' · can be assigned jobs' : ''}</div>
+        <span class="pill ${m.member_role==='owner'?'solid':m.member_role==='dispatcher'?'red':'gray'}" style="margin-left:6px">${T(ROLE_LABEL[m.member_role] || m.member_role)}</span>
+        <div class="faint" style="margin-top:3px">${esc(m.phone)}${m.location_label ? ' · ' + esc(m.location_label) : ' · ' + T('any yard')}${m.assignable ? ' · ' + T('can be assigned jobs') : ''}</div>
       </div>
       ${isOwner() && m.member_role !== 'owner' ? `
-        <button class="btn ghost" style="width:auto; padding:9px 14px; font-size:12px" onclick="removeMember(${m.id},'${esc(m.name||m.phone).replace(/'/g,'')}')">Remove</button>` : ''}
+        <button class="btn ghost" style="width:auto; padding:9px 14px; font-size:12px" onclick="removeMember(${m.id},'${esc(m.name||m.phone).replace(/'/g,'')}')">${T('Remove')}</button>` : ''}
       </div>
     </div>`).join('')}
 
   <div class="card" style="background:var(--soft)">
     <div class="mini" style="line-height:1.6">
-      <b class="k">Owner</b> runs the account — billing, coverage, services and this page.<br>
-      <b class="k">Dispatcher</b> gets the lead alerts for their yard, buys leads, talks to drivers and assigns jobs.<br>
-      <b class="k">Technician</b> sees only the jobs assigned to them — never the lead feed, never what anything cost.
+      <b class="k">${T('Owner')}</b> ${T('runs the account — billing, coverage, services and this page.')}<br>
+      <b class="k">${T('Dispatcher')}</b> ${T('gets the lead alerts for their yard, buys leads, talks to drivers and assigns jobs.')}<br>
+      <b class="k">${T('Technician')}</b> ${T('sees only the jobs assigned to them — never the lead feed, never what anything cost.')}
     </div>
   </div>`;
 }
 async function addMember(){
+  if (firstInvalid([['mb-name', qv('mb-name').trim().length >= 2, T('Enter a team member name')],
+    ['mb-phone', /^\+?[\d\s().-]{7,}$/.test(qv('mb-phone').trim()), T('Enter a valid mobile number')]])) return;
   const name = qv('mb-name').trim(), phone = qv('mb-phone').trim();
   if (!name || !phone) return toast('Name and mobile number both needed');
-  const r = await api('POST', '/provider/members', { name, phone,
+  const invited = await api('POST', '/provider/members', { name, phone,
     member_role: $('mb-role').value, member_location_id: $('mb-loc').value || null,
     lang: $('mb-lang')?.value || 'en' });
-  toast(r.sms_simulated
-    ? name + ' added — test mode, so no text went out. Tell them to sign in with their number.'
-    : name + ' added — we texted them a sign-in link');
+  clearFormProgress('p-people');
+  toast(invited.sms_simulated
+    ? T('{name} added — test mode, so no text went out. Tell them to sign in with their number.', { name })
+    : T('{name} added — we texted them a sign-in link', { name }), true);
   render();
 }
 async function removeMember(id, name){
-  if (!confirm(`Remove ${name} from your team?\n\nThey lose access immediately. Any job they had open goes back to your queue.`)) return;
+  if (!confirm(T('Remove {name} from your team?\n\nThey lose access immediately. Any job they had open goes back to your queue.', { name }))) return;
   const r = await api('DELETE', '/provider/members/' + id);
-  toast(r.unassigned_jobs ? `Removed — ${r.unassigned_jobs} job${r.unassigned_jobs===1?'':'s'} back in the queue` : 'Removed');
+  toast(r.unassigned_jobs
+    ? TN(r.unassigned_jobs, 'Removed — {n} job back in the queue', 'Removed — {n} jobs back in the queue')
+    : T('Removed'));
   render();
 }
 
@@ -1872,50 +2345,85 @@ async function vPJobs(){
   const card = j => {
     const st = jobState(j);
     return `
-    <div class="card ${st.k==='new'||j.assign_bounced ? 'alert' : ''}">
+    <div class="card ${st.k==='new'||j.assign_bounced||j.rescue_requested_at ? 'alert' : ''}">
       <div class="row"><div>
         <b class="mini k">Job #${j.id} — ${esc(j.service_label)}</b>
         <div class="faint" style="margin-top:3px">${esc(j.driver_name || 'Driver')} · ${esc(j.driver_phone||'')} · ${esc(j.area_label)} · won ${timeAgo(j.created_at)}</div>
       </div><span class="pill ${st.c}">${st.t}</span></div>
-      ${j.assign_bounced && !j.assigned_tech ? `<div class="mini" style="color:var(--red); margin-top:7px">${ic('warn',13)} Nobody accepted this — it came back to you. Reassign it.</div>` : ''}
+      ${j.assign_bounced && !j.assigned_tech ? `<div class="mini" style="color:var(--red); margin-top:7px">${ic('warn',13)} ${T('Nobody accepted this — it came back to you. Reassign it.')}</div>` : ''}
+      ${j.assignment_bounces ? `<div class="faint" style="margin-top:5px">${j.assignment_bounces} assignment${j.assignment_bounces===1?'':'s'} returned to dispatch${j.decline_reason ? ' · '+esc(j.decline_reason) : ''}</div>` : ''}
+      ${j.rescue_requested_at ? `<div class="mini" style="color:var(--red); margin-top:7px">${ic('bell',13)} The driver asked for help — update or reassign this job now.</div>` : ''}
       ${j.tech_name ? `<div class="mini" style="margin-top:7px">${ic('user',13)} ${esc(j.tech_name)}${j.eta_minutes && st.k==='enroute' ? ` · ETA ${j.eta_minutes} min` : ''}</div>` : ''}
       ${!j.completed_at ? `<div class="mini" style="margin-top:9px">${ic('pin',12)} ${esc(j.landmark || j.area_label)}</div>
+        ${j.location_source === 'manual' ? `<div class="faint" style="color:var(--red);margin-top:4px">${ic('warn',12)} Approximate town entered manually — confirm the landmark with the driver.</div>` : ''}
         <div style="margin-top:8px">${directions(j.lat, j.lng, { subtle:true })}</div>` : ''}
       ${!j.completed_at ? `
       <div class="row" style="gap:8px; margin-top:10px; flex-wrap:wrap">
         <select id="as-${j.id}" style="flex:1; min-width:150px">
-          <option value="">Assign to…</option>${techOpts(j)}
+          <option value="">${T('Assign to…')}</option>${techOpts(j)}
         </select>
-        <button class="btn dark" style="width:auto; padding:11px 16px; font-size:13px" onclick="assignJob(${j.id})">
+        <button class="btn dark" style="width:auto; padding:11px 16px; font-size:13px" onclick="assignJob(${j.id},${j.assignment_version})">
           ${j.assigned_tech ? 'Reassign' : 'Assign'}</button>
+      </div>` : ''}
+      ${!j.completed_at && j.assigned_tech === S.me.id ? `
+      <div class="card" style="margin:10px 0 0; background:var(--soft)">
+        <span class="sec">${T("This one's yours")}</span>
+        <div style="margin-top:8px">
+        ${!j.enroute_at ? `
+          <div class="row" style="gap:8px">
+            <input type="number" id="eta-${j.id}" placeholder="${T('ETA min')}" value="30" style="width:110px">
+            <button class="btn" onclick="jobEnroute(${j.id},${j.assignment_version})">${ic('truck',16)} ${T('On my way')}</button>
+          </div>`
+        : !j.arrived_at ? `
+          <div class="row" style="gap:8px">
+            <button class="btn" onclick="jobAction(${j.id},'arrived',${j.assignment_version})">${ic('check',16)} ${T("I've arrived")}</button>
+            <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobLate(${j.id},${j.assignment_version})">${T('Running late')}</button>
+          </div>`
+        : `<button class="btn" onclick="jobAction(${j.id},'complete',${j.assignment_version})">${ic('check',16)} ${T('Job complete')}</button>`}
+        </div>
       </div>` : ''}
       ${j.completed_at && !isTech() ? (j.my_driver_rating
         ? `<div class="mini" style="margin-top:9px; color:var(--muted)">${ic('star',13)} You rated this driver ${j.my_driver_rating}★</div>`
         : `<div class="row" style="margin-top:10px; flex-wrap:wrap; gap:8px">
-            <span class="mini k">Rate this driver</span>
+        <span class="mini k">${T('Rate this driver')}</span>
             <span class="stars" style="gap:5px">${[1,2,3,4,5].map(n=>`<svg class="ic fill" width="24" height="24" viewBox="0 0 24 24" style="cursor:pointer" onclick="rateDriver(${j.id},${n})">${PATHS.star}</svg>`).join('')}</span>
-            <span class="faint">Did they pay, show up, answer the phone? Other shops see this before buying their leads.</span>
+        <span class="faint">${T('Did they pay, show up, answer the phone? Other shops see this before buying their leads.')}</span>
           </div>`) : ''}
     </div>`;
   };
   return `
-  <h2 class="scr">Jobs</h2>
-  <p class="scrsub">Work you won — assign it to someone and watch it move</p>
-  ${!d.techs.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} Nobody on your team can be assigned work yet. Add your techs in <a onclick="nav('p-people')">Your team</a>.</div></div>` : ''}
-  ${live.length ? live.map(card).join('') : '<div class="card" style="text-align:center"><span class="muted">No live jobs. Buy a lead and win it and it lands here.</span></div>'}
+  <h2 class="scr">${T('Jobs')}</h2>
+  <p class="scrsub">${T('Work you won — assign it to someone and watch it move')}</p>
+  ${!d.techs.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} ${T('Nobody on your team can be assigned work yet. Add your techs in Your team.')}</div></div>` : ''}
+  ${live.length ? live.map(card).join('') : `<div class="card" style="text-align:center"><span class="muted">${T('No live jobs. Buy a lead and win it and it lands here.')}</span></div>`}
   ${done.length ? `<div style="height:16px"></div><span class="sec">Completed (${done.length})</span>${done.map(card).join('')}` : ''}`;
 }
 async function rateDriver(id, stars){
   await api('POST', `/jobs/${id}/rate-driver`, { stars });
-  toast(`Driver rated ${stars}★ — thanks, this keeps the feed honest`);
+  toast(T('Driver rated {stars}★ — thanks, this keeps the feed honest', { stars }));
   render();
 }
-async function assignJob(id){
+async function assignJob(id, assignmentVersion){
   const techId = $('as-' + id)?.value;
   if (!techId) return toast('Pick someone first');
-  const r = await api('POST', `/jobs/${id}/assign`, { tech_id: Number(techId) });
-  toast(r.self_accepted ? "It's yours — hit On my way when you roll" : 'Assigned — we texted them');
-  render();
+  S.assignmentCommands ||= {};
+  const slot = `${id}:${assignmentVersion}:${techId}`;
+  const commandKey = S.assignmentCommands[slot]
+    || `assign_${id}_${assignmentVersion}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  S.assignmentCommands[slot] = commandKey;
+  try {
+    const r = await api('POST', `/jobs/${id}/assign`, {
+      tech_id: Number(techId),
+      assignment_version: assignmentVersion,
+      command_key: commandKey
+    });
+    delete S.assignmentCommands[slot];
+    if (r.self_accepted) { toast(T("It's yours — hit On my way when you roll"), true); render(); return; }
+    toast('Assigned — we texted them');
+    render();
+  } catch (error) {
+    if (error.status === 409) delete S.assignmentCommands[slot];
+  }
 }
 
 /* ---------------- technician: one screen, only their work ---------------- */
@@ -1932,64 +2440,70 @@ async function vTechJobs(){
         <span class="pill ${st.c}">${st.t}</span></div>
 
       ${!j.accepted_at ? `
-        <div class="mini" style="margin:10px 0">${esc(j.duty_class === 'medium' ? 'Medium duty' : j.duty_class === 'light' ? 'Light duty' : 'Heavy duty')} · ${esc(j.truck?.make || '')} ${esc(j.truck?.model || '')}</div>
+        <div class="mini" style="margin:10px 0">${T(j.duty_class === 'medium' ? 'Medium duty' : j.duty_class === 'light' ? 'Light duty' : 'Heavy duty')} · ${esc(j.truck?.make || '')} ${esc(j.truck?.model || '')}</div>
         <div class="row" style="gap:8px">
-          <button class="btn" onclick="jobAction(${j.id},'accept')">${ic('check',16)} Accept this job</button>
-          <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobAction(${j.id},'decline')">Can't take it</button>
+          <button class="btn" onclick="jobAction(${j.id},'accept',${j.assignment_version})">${ic('check',16)} ${T('Accept this job')}</button>
+          <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobAction(${j.id},'decline',${j.assignment_version})">${T("Can't take it")}</button>
         </div>` : `
         <div class="mini listline" style="margin:10px 0; line-height:1.9">
-          <span class="muted">Driver</span> &nbsp;<b class="k">${esc(j.driver_name || '')}</b> ·
+          <span class="muted">${T('Driver')}</span> &nbsp;<b class="k">${esc(j.driver_name || '')}</b> ·
             <a href="tel:${esc(j.driver_phone||'')}" style="color:var(--red); font-weight:700">${esc(j.driver_phone||'')}</a><br>
-          <span class="muted">Where</span> &nbsp;${esc(j.landmark || j.area_label)}<br>
-          <span class="muted">Problem</span> &nbsp;${esc(j.description || j.service_label)}<br>
-          ${tp ? `<span class="muted">Tire</span> &nbsp;<b class="k" style="color:var(--red)">${esc([tp.axle, tp.side, tp.position].filter(x=>x&&x!=='Single').join(' · '))}</b>${tp.size ? ' — ' + esc(tp.size) : ''}<br>` : ''}
+          <span class="muted">${T('Where')}</span> &nbsp;${esc(j.landmark || j.area_label)}<br>
+          ${j.location_source === 'manual' ? `<span style="color:var(--red)">${ic('warn',12)} ${T('Approximate manual location — call the driver to confirm the exact spot.')}</span><br>` : ''}
+          <span class="muted">${T('Problem')}</span> &nbsp;${esc(j.description || j.service_label)}<br>
+          ${tp ? `<span class="muted">${T('Tire')}</span> &nbsp;<b class="k" style="color:var(--red)">${esc([tp.axle, tp.side, tp.position].filter(x=>x&&x!=='Single').join(' · '))}</b>${tp.size ? ' — ' + esc(tp.size) : ''}<br>` : ''}
           ${(() => { const rig = [j.truck?.year, j.truck?.make, j.truck?.model].filter(Boolean).join(' ');
             const tr = j.trailer?.type ? ' + ' + j.trailer.type : '';
-            return (rig || tr) ? `<span class="muted">Rig</span> &nbsp;${esc(rig)}${esc(tr)}${j.trailer?.hazmat ? ' <span style="color:var(--red); font-weight:700">(HAZMAT)</span>' : ''}` : ''; })()}
+            return (rig || tr) ? `<span class="muted">${T('Rig')}</span> &nbsp;${esc(rig)}${esc(tr)}${j.trailer?.hazmat ? ` <span style="color:var(--red); font-weight:700">(${T('HAZMAT')})</span>` : ''}` : ''; })()}
         </div>
         <div style="margin-bottom:12px">${directions(j.lat, j.lng)}</div>
         ${!j.enroute_at ? `
           <div class="row" style="gap:8px">
-            <input type="number" id="eta-${j.id}" placeholder="ETA min" value="30" style="width:110px">
-            <button class="btn" onclick="jobEnroute(${j.id})">${ic('truck',16)} On my way</button>
+            <input type="number" id="eta-${j.id}" placeholder="${T('ETA min')}" value="30" style="width:110px">
+            <button class="btn" onclick="jobEnroute(${j.id},${j.assignment_version})">${ic('truck',16)} ${T('On my way')}</button>
           </div>`
         : !j.arrived_at ? `
-          <div class="mini" style="margin-bottom:8px">${ic('clock',13)} Driver is expecting you in about ${j.eta_minutes} min</div>
+          <div class="mini" style="margin-bottom:8px">${ic('clock',13)} ${T('Driver is expecting you in about {n} min', { n: j.eta_minutes })}</div>
           <div class="row" style="gap:8px">
-            <button class="btn" onclick="jobAction(${j.id},'arrived')">${ic('check',16)} I've arrived</button>
-            <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobLate(${j.id})">Running late</button>
+            <button class="btn" onclick="jobAction(${j.id},'arrived',${j.assignment_version})">${ic('check',16)} ${T("I've arrived")}</button>
+            <button class="btn ghost" style="width:auto; padding:13px 16px" onclick="jobLate(${j.id},${j.assignment_version})">${T('Running late')}</button>
           </div>`
-        : `<button class="btn" onclick="jobAction(${j.id},'complete')">${ic('check',16)} Job complete</button>`}
+        : `<button class="btn" onclick="jobAction(${j.id},'complete',${j.assignment_version})">${ic('check',16)} ${T('Job complete')}</button>`}
       `}
     </div>`;
   };
   return `
-  <h2 class="scr">My jobs</h2>
-  <p class="scrsub">${live.length ? 'Tap Accept, then keep the driver posted' : 'Nothing assigned right now'}</p>
-  ${live.map(card).join('') || '<div class="card" style="text-align:center"><span class="muted">No jobs assigned to you yet. Your dispatcher will send one over — you\'ll get a text.</span></div>'}
-  ${done.length ? `<div style="height:16px"></div><span class="sec">Finished (${done.length})</span>
+  <h2 class="scr">${T('My jobs')}</h2>
+  <p class="scrsub">${T(live.length ? 'Tap Accept, then keep the driver posted' : 'Nothing assigned right now')}</p>
+  ${live.map(card).join('') || `<div class="card" style="text-align:center"><span class="muted">${T("No jobs assigned to you yet. Your dispatcher will send one over — you'll get a text.")}</span></div>`}
+  ${done.length ? `<div style="height:16px"></div><span class="sec">${T('Finished ({n})', { n: done.length })}</span>
     ${done.slice(0,10).map(j=>`<div class="card"><div class="row"><div><b class="mini k">${esc(j.service_label)}</b>
       <div class="faint">${esc(j.area_label)} · ${timeAgo(j.completed_at)}</div></div>
-      <span class="pill gray">COMPLETE</span></div></div>`).join('')}` : ''}`;
+      <span class="pill gray">${T('COMPLETE')}</span></div></div>`).join('')}` : ''}`;
 }
-async function jobAction(id, action){
-  if (action === 'decline' && !confirm("Hand this job back to your dispatcher?")) return;
-  await api('POST', `/jobs/${id}/${action}`);
+async function jobAction(id, action, assignmentVersion){
+  if (action === 'decline' && !confirm(T('Hand this job back to your dispatcher?'))) return;
+  await api('POST', `/jobs/${id}/${action}`, { assignment_version: assignmentVersion });
   toast({ accept:'Accepted', decline:'Sent back to dispatch', arrived:'Driver has been told you arrived',
-          complete:'Job closed — the driver has been asked to rate you' }[action] || 'Done');
+          complete:'Job closed — the driver has been asked to rate you' }[action] || 'Done', true);
   render();
 }
-async function jobEnroute(id){
+async function jobEnroute(id, assignmentVersion){
   const eta = Number(qv('eta-' + id)) || 30;
-  await api('POST', `/jobs/${id}/enroute`, { eta_minutes: eta });
-  toast('Driver notified — they can see your ETA counting down');
+  await api('POST', `/jobs/${id}/enroute`, { eta_minutes: eta, assignment_version: assignmentVersion });
+  toast('Driver notified — they can see your ETA counting down', true);
   render();
 }
-async function jobLate(id){
-  const mins = prompt('How many more minutes?', '15');
+async function jobLate(id, assignmentVersion){
+  const mins = prompt(T('How many more minutes?'), '15');
   if (mins === null) return;
-  await api('POST', `/jobs/${id}/late`, { eta_minutes: Number(mins) || 15 });
-  toast('Driver has been updated');
+  const actionKey = `late_${id}_${assignmentVersion}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  await api('POST', `/jobs/${id}/late`, {
+    eta_minutes: Number(mins) || 15,
+    assignment_version: assignmentVersion,
+    action_key: actionKey
+  });
+  toast('Driver has been updated', true);
   render();
 }
 
@@ -2000,7 +2514,7 @@ async function vPStats(){
   const max = Math.max(1, ...week.map(w=>w[1]));
   return `
   <h2 class="scr">${esc(S.provider?.name || 'My Company')}</h2>
-  <p class="scrsub">Performance on RIGRX</p>
+  <p class="scrsub">${T('Performance on RIGRX')}</p>
   <div class="tiles">
     ${pTile('Leads bought', s.leads_bought, 'tap for the list', "'p-myleads'", "{leadFilter:''}")}
     ${pTile('Jobs won', s.jobs_won, s.win_rate + '% win rate', "'p-myleads'", "{leadFilter:'won'}")}
@@ -2013,17 +2527,17 @@ async function vPStats(){
   </div>
   <div class="cols2"><div>
   <div class="card">
-    <span class="sec">Leads bought — last 7 days</span>
+    <span class="sec">${T('Leads bought — last 7 days')}</span>
     <div class="bars7">
       ${week.map(w=>`<div class="b"><span class="val">${w[1]||''}</span><div class="bar" style="height:${Math.round(w[1]/max*100)}%"></div><span class="lb">${w[0]}</span></div>`).join('')}
     </div>
   </div></div><div>
   <div class="card">
-    <span class="sec">What these numbers mean</span>
+    <span class="sec">${T('What these numbers mean')}</span>
     <div class="mini listline" style="margin-top:8px; line-height:1.9">
-      <span class="muted">Win rate</span> &nbsp;How often the driver picked you after you bought. Chatting first and quoting a clear ETA is what moves this.<br>
-      <span class="muted">Cost per job won</span> &nbsp;Total lead spend divided by jobs won. Compare it to what an average job is worth to you — that's whether RIGRX pays.<br>
-      <span class="muted">Avg reply time</span> &nbsp;How long you take to message the driver after buying. The first company to respond wins most of the time.
+      <span class="muted">${T('Win rate')}</span> &nbsp;${T('How often the driver picked you after you bought. Chatting first and quoting a clear ETA is what moves this.')}<br>
+      <span class="muted">${T('Cost per job won')}</span> &nbsp;${T("Total lead spend divided by jobs won. Compare it to what an average job is worth to you — that's whether RIGRX pays.")}<br>
+      <span class="muted">${T('Avg reply time')}</span> &nbsp;${T('How long you take to message the driver after buying. The first company to respond wins most of the time.')}
     </div>
   </div></div></div>`;
 }
@@ -2045,8 +2559,8 @@ async function vPReviews(){
   const topTags = Object.entries(tagCounts).sort((a,b)=>b[1]-a[1]);
   return `
   <button class="back" onclick="nav('p-stats')">${ic('chevL',15)} Stats</button>
-  <h2 class="scr">What drivers said</h2>
-  <p class="scrsub">Every rating left for you, and the job it came from</p>
+  <h2 class="scr">${T('What drivers said')}</h2>
+  <p class="scrsub">${T('Every rating left for you, and the job it came from')}</p>
   ${total ? `
   <div class="cols2"><div>
   <div class="card">
@@ -2063,7 +2577,7 @@ async function vPReviews(){
         <span class="faint" style="width:22px; text-align:right">${countFor(n)}</span></div>`).join('')}
   </div>
   ${topTags.length ? `<div class="card">
-    <span class="sec">What they mention most</span>
+    <span class="sec">${T('What they mention most')}</span>
     <div class="chips" style="margin-top:9px">
       ${topTags.map(([t,n])=>`<span class="chip sel">${esc(t)} · ${n}</span>`).join('')}
     </div>
@@ -2079,63 +2593,62 @@ async function vPReviews(){
     </div>`).join('')}
   </div></div>` : `
   <div class="card" style="text-align:center">
-    <span class="muted">No reviews yet. Drivers are asked to rate you after they mark the job complete —
-    the fastest way to your first one is to win a job and do it well.</span>
+    <span class="muted">${T('No reviews yet. Drivers are asked to rate you after they mark the job complete — the fastest way to your first one is to win a job and do it well.')}</span>
   </div>`}`;
 }
 async function vPSettings(){
   const p = S.provider || {};
   const svcCount = Object.values(p.services || {}).reduce((a,b)=>a+(b?.length||0),0);
   return `
-  <h2 class="scr">Company Settings</h2>
-  <p class="scrsub">What you do & where you cover controls which leads you see</p>
+  <h2 class="scr">${T('Company Settings')}</h2>
+  <p class="scrsub">${T('What you do & where you cover controls which leads you see')}</p>
   ${pendingBanner(p.approved)}
   <div class="cols2"><div>
   <div class="card">
-    <div class="row"><span class="sec">Company</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup1')">${ic('edit',13)} Edit</span></div>
-    <div class="mini" style="margin-top:7px; line-height:1.8"><b class="k">${esc(p.name)}</b>${p.primary_trade ? ` <span class="pill red">${esc(tradeLabel(p.primary_trade).toUpperCase())}</span>` : ' <span class="pill gray">NO TRADE SET</span>'}<br>${esc(p.dispatch_phone)} · ${esc(p.email)}<br>${esc(p.hours)}</div>
+    <div class="row"><span class="sec">${T('Company')}</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup1')">${ic('edit',13)} ${T('Edit')}</span></div>
+    <div class="mini" style="margin-top:7px; line-height:1.8"><b class="k">${esc(p.name)}</b>${p.primary_trade ? ` <span class="pill red">${esc(tradeLabel(p.primary_trade).toUpperCase())}</span>` : ` <span class="pill gray">${T('NO TRADE SET')}</span>`}<br>${esc(p.dispatch_phone)} · ${esc(p.email)}<br>${esc(p.hours)}</div>
   </div>
   <div class="card">
-    <div class="row"><span class="sec">Locations & coverage</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup2')">${ic('edit',13)} Edit</span></div>
-    ${(p.locations||[]).map(l=>`<div class="checkrow"><span class="cico on">${ic('pin',15)}</span><div class="mini"><b class="k">${esc(l.label)}</b><div class="faint">${l.radius_mi} mi radius${l.phone ? ' · '+esc(l.phone) : ''}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No locations yet</div>'}
+    <div class="row"><span class="sec">${T('Locations & coverage')}</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup2')">${ic('edit',13)} ${T('Edit')}</span></div>
+    ${(p.locations||[]).map(l=>`<div class="checkrow"><span class="cico on">${ic('pin',15)}</span><div class="mini"><b class="k">${esc(l.label)}</b><div class="faint">${T('{n} mi radius', { n: l.radius_mi })}${l.phone ? ' · '+esc(l.phone) : ''}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No locations yet')}</div>`}
   </div>
   <div class="card">
-    <div class="row"><span class="sec">Services offered (${svcCount})</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup3')">${ic('edit',13)} Edit</span></div>
+    <div class="row"><span class="sec">${T('Services offered ({n})', { n: svcCount })}</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup3')">${ic('edit',13)} ${T('Edit')}</span></div>
     ${Object.entries(p.services||{}).filter(([,v])=>v?.length).map(([k,items])=>`
-      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(catByKey(k)?.label || k)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No services selected yet</div>'}
+      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(catByKey(k)?.label || k)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No services selected yet')}</div>`}
   </div>
   </div><div>
   <div class="card">
-    <div class="row"><span class="sec">Equipment & capabilities</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup4')">${ic('edit',13)} Edit</span></div>
+    <div class="row"><span class="sec">${T('Equipment & capabilities')}</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup4')">${ic('edit',13)} ${T('Edit')}</span></div>
     <div class="chips" style="margin-top:7px">
       ${(p.duty_classes || ['heavy','medium']).map(k=>`<span class="pill red">${k === 'heavy' ? 'HEAVY' : k === 'medium' ? 'MEDIUM DUTY' : 'LIGHT DUTY'}</span>`).join('')}
     </div>
     <div class="mini" style="margin-top:7px; line-height:1.8">${['wreckers','rotator','service','landoll'].map(k=>p.equipment?.[k] ? esc(p.equipment[k]) + ' ' + k : '').filter(Boolean).join(' · ') || '—'}</div>
     <div class="chips" style="margin-top:10px">
-      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${ic('check',10)} ${esc(label)}</span>`).join('') || '<span class="faint">No capability flags set — you may be missing matching leads</span>'}
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${ic('check',10)} ${T(label)}</span>`).join('') || `<span class="faint">${T('No capability flags set — you may be missing matching leads')}</span>`}
     </div>
   </div>
   <div class="card">
-    <div class="row"><span class="sec">Verification</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup5')">${ic('edit',13)} Edit</span></div>
-    <div class="checkrow"><span class="cico ${p.verification?.license?'on':''}">${ic('check',15)}</span><span class="mini">License ${p.verification?.license ? '— '+esc(p.verification.license) : '(add it)'}</span></div>
-    <div class="checkrow"><span class="cico ${p.verification?.coi_file?'on':''}">${ic('check',15)}</span><span class="mini">Certificate of insurance ${p.verification?.coi_file ? '— uploaded' : '(upload)'}</span></div>
-    <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${p.approved ? 'Approved — you can buy leads' : 'Pending RIGRX review'}</span></div>
-    <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${p.license_verified ? 'License verified — you receive licensed-only leads'
-      : (p.verification?.license ? 'License on file — awaiting RIGRX verification' : 'No license on file — you miss licensed-only leads')}</span></div>
+    <div class="row"><span class="sec">${T('Verification')}</span><span class="faint" style="cursor:pointer" onclick="nav('p-setup5')">${ic('edit',13)} ${T('Edit')}</span></div>
+    <div class="checkrow"><span class="cico ${p.verification?.license?'on':''}">${ic('check',15)}</span><span class="mini">${T('License')} ${p.verification?.license ? '— '+esc(p.verification.license) : T('(add it)')}</span></div>
+    <div class="checkrow"><span class="cico ${p.verification?.coi_file?'on':''}">${ic('check',15)}</span><span class="mini">${T('Certificate of insurance')} ${p.verification?.coi_file ? '— '+T('uploaded') : T('(upload)')}</span></div>
+    <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${T(p.approved ? 'Approved — you can buy leads' : 'Pending RIGRX review')}</span></div>
+    <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${T(p.license_verified ? 'License verified — you receive licensed-only leads'
+      : (p.verification?.license ? 'License on file — awaiting RIGRX verification' : 'No license on file — you miss licensed-only leads'))}</span></div>
   </div>
   <div class="card">
-    <div class="row"><span class="sec">Spanish-speaking dispatch</span>
+    <div class="row"><span class="sec">${T('Spanish-speaking dispatch')}</span>
       <span class="chips"><span class="chip ${p.spanish_dispatch?'sel':''}" id="es-dispatch" onclick="toggleSpanishDispatch(${p.spanish_dispatch ? 'false' : 'true'})">${p.spanish_dispatch ? 'ON' : 'OFF'}</span></span></div>
-    <div class="faint" style="margin-top:7px; line-height:1.5">Turn this on if someone answering your dispatch line speaks Spanish. Spanish-speaking drivers see a "Hablamos español" badge next to your name when comparing responders — it wins jobs.</div>
+    <div class="faint" style="margin-top:7px; line-height:1.5">${T('Turn this on if someone answering your dispatch line speaks Spanish. Spanish-speaking drivers see a "Hablamos español" badge next to your name when comparing responders — it wins jobs.')}</div>
   </div>
-  <div class="card"><span class="sec">Billing</span>
-    ${p.lead_credits > 0 ? `<div class="mini" style="margin-top:7px; color:#14603a"><b class="k" style="color:#14603a">${p.lead_credits} free lead${p.lead_credits===1?'':'s'} remaining</b> — used automatically before your card.</div>` : ''}
+  <div class="card"><span class="sec">${T('Billing')}</span>
+    ${p.lead_credits > 0 ? `<div class="mini" style="margin-top:7px; color:#14603a"><b class="k" style="color:#14603a">${TN(p.lead_credits, '{n} free lead remaining', '{n} free leads remaining')}</b> — ${T('used automatically before your card.')}</div>` : ''}
     <div class="mini" style="margin-top:7px; line-height:1.7">
       ${S.simulatedPayments
-        ? ic('zap',13)+' Payment simulation mode — no card needed yet'
+        ? ic('zap',13)+' '+T('Payment simulation mode — no card needed yet')
         : p.card_last4
           ? ic('card',13)+' '+esc((p.card_brand || 'Card').toUpperCase())+' ····'+esc(p.card_last4)+' · charged when you unlock a lead'
-          : ic('warn',13)+' <b class="k">No card on file.</b> Once your free leads run out you will need one to keep buying.'}
+          : ic('warn',13)+` <b class="k">${T('No card on file.')}</b> ${T('Once your free leads run out you will need one to keep buying.')}`}
     </div>
     ${!S.simulatedPayments && isOwner() ? `<div style="height:10px"></div>
       <button class="btn ghost" style="width:auto; padding:10px 16px" onclick="openCardModal()">${ic('card',15)} ${p.card_last4 ? 'Replace card' : 'Add a card'}</button>` : ''}
@@ -2153,8 +2666,8 @@ async function vAHome(){
       <div class="v">${value}</div>${sub ? `<div class="d">${sub}</div>` : ''}
     </div>`;
   return `
-  <h2 class="scr">RIGRX Admin</h2>
-  <p class="scrsub">The whole marketplace at a glance — click any number to see what's behind it</p>
+  <h2 class="scr">${T('RIGRX Admin')}</h2>
+  <p class="scrsub">${T("The whole marketplace at a glance — click any number to see what's behind it")}</p>
   <div class="tiles">
     ${tile('Requests (24h)', o.requests_24h, 'tap for the list', 'a-requests', `{adminReqWindow:'24h'}`)}
     ${tile('Revenue (24h)', fmt$(o.revenue_24h_cents), 'every lead sold today', 'a-purchases', `{adminSalesWindow:'24h'}`)}
@@ -2162,10 +2675,12 @@ async function vAHome(){
     ${tile('Fill rate', o.fill_rate + '%', 'requests nobody bought', 'a-requests', `{adminReqWindow:'unfilled'}`)}
     ${tile('Drivers', o.drivers, 'who is requesting help', 'a-drivers')}
     ${tile('Providers', o.providers, `${o.pending_providers} awaiting approval`, 'a-providers')}
+    ${tile('Dispatch exceptions', o.open_dispatch_exceptions, 'jobs needing operational attention', 'a-exceptions')}
     ${tile('Chat flags', o.open_flags, 'messages to review', 'a-flags')}
   </div>
   ${o.pending_providers ? `<div class="card click alert" onclick="nav('a-providers')"><div class="row"><span class="mini k">${ic('clock',14)} ${o.pending_providers} provider${o.pending_providers===1?'':'s'} waiting for approval</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
-  ${o.open_flags ? `<div class="card click alert" onclick="nav('a-flags')"><div class="row"><span class="mini k">${ic('warn',14)} ${o.open_flags} chat message${o.open_flags===1?'':'s'} flagged for review</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
+  ${o.open_flags ? `<div class="card click alert" onclick="nav('a-flags')"><div class="row"><span class="mini k">${ic('warn',14)} ${o.open_flags} chat message${o.open_flags===1?'':'s'} flagged for review</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}
+  ${o.open_dispatch_exceptions ? `<div class="card click alert" onclick="nav('a-exceptions')"><div class="row"><span class="mini k">${ic('bell',14)} ${o.open_dispatch_exceptions} dispatch exception${o.open_dispatch_exceptions===1?'':'s'} need attention</span><span style="color:var(--red)">${ic('arrowR',16)}</span></div></div>` : ''}`;
 }
 /* The review queue. Nothing here was blocked — these are messages that already went
    through, listed so the admin can decide whether a company needs a phone call. */
@@ -2187,28 +2702,28 @@ async function vAFlags(){
       </div><span class="pill ${tone}">${label}</span></div>
       <div class="quote" style="display:block">
         <div class="mini" style="line-height:1.5">"${esc((f.body || '').slice(0, 240))}"</div>
-        <div class="faint" style="margin-top:6px">matched: <b class="k">${esc(f.snippet)}</b>${f.warned ? ' · <span style="color:var(--red)">warned first and sent it anyway</span>' : ''}</div>
+         <div class="faint" style="margin-top:6px">${T('matched:')} <b class="k">${esc(f.snippet)}</b>${f.warned ? ` · <span style="color:var(--red)">${T('warned first and sent it anyway')}</span>` : ''}</div>
       </div>
       <div class="row" style="margin-top:10px">
-        <a onclick="nav('a-provider',{adminProviderId:${f.provider_id}})">Open ${esc(f.company || 'company')}</a>
-        ${f.reviewed_at ? '<span class="pill gray">REVIEWED</span>'
-          : `<button class="btn ghost" style="width:auto; padding:9px 14px" onclick="reviewFlag(${f.id})">${ic('check',14)} Mark reviewed</button>`}
+         <a onclick="nav('a-provider',{adminProviderId:${f.provider_id}})">${T('Open {company}', { company: esc(f.company || T('company')) })}</a>
+         ${f.reviewed_at ? `<span class="pill gray">${T('REVIEWED')}</span>`
+           : `<button class="btn ghost" style="width:auto; padding:9px 14px" onclick="reviewFlag(${f.id})">${ic('check',14)} ${T('Mark reviewed')}</button>`}
       </div>
     </div>`;
   };
   return `
-  <h2 class="scr">Chat flags</h2>
-  <p class="scrsub">Nothing here was blocked — a driver stuck on the shoulder always gets his message through. This is what to follow up on.</p>
+  <h2 class="scr">${T('Chat flags')}</h2>
+  <p class="scrsub">${T('Nothing here was blocked — a driver stuck on the shoulder always gets his message through. This is what to follow up on.')}</p>
   ${d.repeat.length ? `<div class="card">
-    <span class="sec">Companies flagged most</span>
+    <span class="sec">${T('Companies flagged most')}</span>
     <div class="mini listline" style="margin-top:8px">
-      ${d.repeat.map(t=>`<span class="muted">${esc(t.company || 'Unknown')}</span> &nbsp;<b class="k">${t.n} flag${t.n===1?'':'s'}</b>`).join('<br>')}
+       ${d.repeat.map(t=>`<span class="muted">${esc(t.company || T('Unknown'))}</span> &nbsp;<b class="k">${TN(t.n, '{n} flag', '{n} flags')}</b>`).join('<br>')}
     </div>
-    <div class="faint" style="margin-top:8px">One flag is usually a shop that doesn't know the rules yet — a phone call fixes it. A pattern is something else.</div>
+     <div class="faint" style="margin-top:8px">${T("One flag is usually a shop that doesn't know the rules yet — a phone call fixes it. A pattern is something else.")}</div>
   </div>` : ''}
   <div class="chips" style="margin:4px 0 12px">
-    <span class="chip ${all?'':'sel'}" onclick="S.flagsAll=false; render()">Needs review</span>
-    <span class="chip ${all?'sel':''}" onclick="S.flagsAll=true; render()">Everything</span>
+     <span class="chip ${all?'':'sel'}" onclick="S.flagsAll=false; render()">${T('Needs review')}</span>
+     <span class="chip ${all?'sel':''}" onclick="S.flagsAll=true; render()">${T('Everything')}</span>
   </div>
   ${d.flags.map(row).join('') || `<div class="card" style="text-align:center"><span class="muted">${ic('check',14)} Nothing flagged${all?'':' that still needs a look'}.</span></div>`}`;
 }
@@ -2224,18 +2739,18 @@ async function vADrivers(){
     <div class="row"><div><b class="mini k">${esc(d.name || '(no name yet)')}</b>
       <div class="faint">${esc(d.phone)}${d.company ? ' · '+esc(d.company) : ''} · ${d.requests} request${d.requests===1?'':'s'} · ${d.trucks} truck${d.trucks===1?'':'s'} · joined ${timeAgo(d.created_at)}</div></div>
     <span style="display:inline-flex; gap:8px; align-items:center">
-      ${d.archived_at ? '<span class="pill dark">ARCHIVED</span>' : ''}
-      <span class="pill ${d.revenue_cents?'solid':'gray'}">${fmt$(d.revenue_cents)} earned</span>
+       ${d.archived_at ? `<span class="pill dark">${T('ARCHIVED')}</span>` : ''}
+       <span class="pill ${d.revenue_cents?'solid':'gray'}">${T('{amount} earned', { amount: fmt$(d.revenue_cents) })}</span>
       <span style="color:var(--red)">${ic('arrowR',16)}</span></span>
   </div></div>`;
   return `
-  <h2 class="scr">Drivers</h2>
-  <p class="scrsub">Everyone who has requested help — click for their full history</p>
-  ${active.map(row).join('') || '<div class="card"><span class="muted">No drivers yet</span></div>'}
+  <h2 class="scr">${T('Drivers')}</h2>
+  <p class="scrsub">${T('Everyone who has requested help — click for their full history')}</p>
+   ${active.map(row).join('') || `<div class="card"><span class="muted">${T('No drivers yet')}</span></div>`}
   <div style="height:16px"></div>
-  <div class="row"><span class="sec">Archived${showArch ? ` (${archived.length})` : ''}</span>
-    <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${showArch ? 'Hide archived' : 'Show archived'} ›</span></div>
-  ${showArch ? (archived.map(row).join('') || '<div class="card"><span class="muted">Nobody archived</span></div>') : ''}`;
+   <div class="row"><span class="sec">${T('Archived')}${showArch ? ` (${archived.length})` : ''}</span>
+     <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${T(showArch ? 'Hide archived' : 'Show archived')} ›</span></div>
+   ${showArch ? (archived.map(row).join('') || `<div class="card"><span class="muted">${T('Nobody archived')}</span></div>`) : ''}`;
 }
 
 /* ---------------- archive & restore (admin) ---------------- */
@@ -2263,10 +2778,12 @@ function archiveCard(userId, who, archivedAt, reason){
   </div>`;
 }
 async function archiveUser(id, who){
-  if (!confirm(`Archive this ${who}?\n\nThey will be signed out and locked out immediately, and will have to create a new account to come back. Nothing is deleted and you can restore them any time.`)) return;
+  if (!confirm(T('Archive this {who}?\n\nThey will be signed out and locked out immediately, and will have to create a new account to come back. Nothing is deleted and you can restore them any time.', { who }))) return;
   const reason = qv('arch-reason-' + id);
   const r = await api('POST', `/admin/users/${id}/archive`, { reason });
-  toast(r.cancelled_requests ? `Archived — ${r.cancelled_requests} open request${r.cancelled_requests===1?'':'s'} closed` : 'Archived');
+  toast(r.cancelled_requests
+    ? TN(r.cancelled_requests, 'Archived — {n} open request closed', 'Archived — {n} open requests closed')
+    : T('Archived'));
   render();
 }
 async function restoreUser(id){
@@ -2280,23 +2797,23 @@ async function vADriver(){
   const u = d.driver;
   return `
   <button class="back" onclick="nav('a-drivers')">${ic('chevL',15)} All drivers</button>
-  <h2 class="scr" style="margin-top:8px">${esc(u.name || '(no name)')}${u.archived_at ? ' <span class="pill dark" style="font-size:10px; vertical-align:middle">ARCHIVED</span>' : ''}</h2>
+   <h2 class="scr" style="margin-top:8px">${u.name ? esc(u.name) : T('(no name)')}${u.archived_at ? ` <span class="pill dark" style="font-size:10px; vertical-align:middle">${T('ARCHIVED')}</span>` : ''}</h2>
   <p class="scrsub">${esc(u.phone)} · ${esc(u.driver_type || 'driver')} · joined ${timeAgo(u.created_at)}${u.rating ? ' · rated '+u.rating+' by providers' : ''}</p>
   <div class="cols2"><div>
   <div class="card">
-    <span class="sec">Contact</span>
+    <span class="sec">${T('Contact')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Phone</span> &nbsp;${esc(u.phone)}<br>
-      <span class="muted">Email</span> &nbsp;${esc(u.email || '—')}<br>
-      <span class="muted">Company</span> &nbsp;${esc(u.company || '—')}
+     <span class="muted">${T('Phone')}</span> &nbsp;${esc(u.phone)}<br>
+     <span class="muted">${T('Email')}</span> &nbsp;${esc(u.email || '—')}<br>
+     <span class="muted">${T('Company')}</span> &nbsp;${esc(u.company || '—')}
     </div>
   </div>
   ${archiveCard(u.id, 'driver', u.archived_at, u.archive_reason)}
   <div class="card">
-    <span class="sec">Equipment on file</span>
+    <span class="sec">${T('Equipment on file')}</span>
     ${d.trucks.map(t=>`<div class="checkrow"><span class="cico on">${ic('truck',15)}</span><div class="mini"><b class="k">Unit ${esc(t.data.unit)} — ${esc(t.data.year)} ${esc(t.data.make)} ${esc(t.data.model)}</b><div class="faint">${esc(t.data.engine)} · ${esc(t.data.axles)} · tires ${esc(t.data.steer)} / ${esc(t.data.drive)}</div></div></div>`).join('')}
     ${d.trailers.map(t=>`<div class="checkrow"><span class="cico on">${ic('trailer',15)}</span><div class="mini"><b class="k">Trailer ${esc(t.data.num)} — ${esc(t.data.type)}</b><div class="faint">${t.data.hazmat ? 'Hazmat Class '+esc(t.data.hzClass)+' · UN '+esc(t.data.un) : 'No hazmat'}</div></div></div>`).join('')}
-    ${!d.trucks.length && !d.trailers.length ? '<div class="faint" style="margin-top:8px">Nothing saved yet</div>' : ''}
+   ${!d.trucks.length && !d.trailers.length ? `<div class="faint" style="margin-top:8px">${T('Nothing saved yet')}</div>` : ''}
   </div>
   </div><div>
   <div class="card">
@@ -2305,7 +2822,7 @@ async function vADriver(){
       <span class="cico ${r.status==='open'?'on':''}">${ic(svcIcon(r.service_key),15)}</span>
       <div class="mini" style="flex:1"><b class="k">#${r.id} — ${esc(r.service_label)}</b>
       <div class="faint">${esc(r.area_label)} · ${r.buyers} bought · ${fmt$(r.revenue_cents)} · ${timeAgo(r.created_at)}</div></div>
-      <span class="pill ${r.status==='open'?'red':'gray'}">${esc(r.status)}</span></div>`).join('') || '<div class="faint" style="margin-top:8px">No requests yet</div>'}
+     <span class="pill ${r.status==='open'?'red':'gray'}">${T(r.status)}</span></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No requests yet')}</div>`}
   </div>
   </div></div>`;
 }
@@ -2318,22 +2835,22 @@ async function vAProviders(){
   const row = p => `<div class="card click" onclick="nav('a-provider',{adminProviderId:${p.user_id}})">
     <div class="row"><div><b class="mini k">${esc(p.name || '(no name yet)')}</b>
       <div class="faint">${p.primary_trade ? esc(tradeLabel(p.primary_trade)) + ' · ' : ''}${esc(p.phone)} · ${p.location_count} location${p.location_count===1?'':'s'} ·
-      License: ${p.verification?.license ? esc(p.verification.license) : 'none given'}</div></div>
+      ${T('License:')} ${p.verification?.license ? esc(p.verification.license) : T('none given')}</div></div>
     <span style="display:inline-flex; gap:6px; align-items:center">
-      ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : ''}
-      ${p.archived_at ? '<span class="pill dark">ARCHIVED</span>' : p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
+      ${p.license_verified ? `<span class="pill dark">${T('LICENSE VERIFIED')}</span>` : ''}
+      ${p.archived_at ? `<span class="pill dark">${T('ARCHIVED')}</span>` : p.approved ? `<span class="pill solid">${T('APPROVED')}</span>` : `<span class="pill red">${T('NEEDS REVIEW')}</span>`}
       <span style="color:var(--red)">${ic('arrowR',16)}</span>
     </span></div></div>`;
   return `
-  <h2 class="scr">Providers</h2>
-  <p class="scrsub">Click any company to see its full profile before you decide</p>
-  ${pending.length ? `<span class="sec">Waiting for review (${pending.length})</span>${pending.map(row).join('')}<div style="height:14px"></div>` : ''}
-  <span class="sec">Approved (${live.length})</span>
-  ${live.map(row).join('') || '<div class="card"><span class="muted">None yet</span></div>'}
+  <h2 class="scr">${T('Providers')}</h2>
+  <p class="scrsub">${T('Click any company to see its full profile before you decide')}</p>
+  ${pending.length ? `<span class="sec">${T('Waiting for review ({n})', { n: pending.length })}</span>${pending.map(row).join('')}<div style="height:14px"></div>` : ''}
+  <span class="sec">${T('Approved ({n})', { n: live.length })}</span>
+  ${live.map(row).join('') || `<div class="card"><span class="muted">${T('None yet')}</span></div>`}
   <div style="height:16px"></div>
-  <div class="row"><span class="sec">Archived${showArch ? ` (${archived.length})` : ''}</span>
-    <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${showArch ? 'Hide archived' : 'Show archived'} ›</span></div>
-  ${showArch ? (archived.map(row).join('') || '<div class="card"><span class="muted">Nobody archived</span></div>') : ''}
+  <div class="row"><span class="sec">${T('Archived')}${showArch ? ` (${archived.length})` : ''}</span>
+    <span class="faint" style="cursor:pointer" onclick="S.showArchived=${!showArch}; render()">${T(showArch ? 'Hide archived' : 'Show archived')} ›</span></div>
+  ${showArch ? (archived.map(row).join('') || `<div class="card"><span class="muted">${T('Nobody archived')}</span></div>`) : ''}
   ${await waitlistCard()}`;
 }
 // Companies that raised their hand from outside a live corridor. This list is the
@@ -2344,20 +2861,20 @@ async function waitlistCard(){
   const waiting = rows.filter(r => !r.contacted);
   return `
   <div style="height:22px"></div>
-  <div class="row"><span class="sec">Coverage waitlist${waiting.length ? ' (' + waiting.length + ' not yet contacted)' : ''}</span></div>
-  <div class="faint" style="margin:6px 0 10px">Companies who found the recruiting page from outside a live area. Where they cluster is where to open next.</div>
+  <div class="row"><span class="sec">${waiting.length ? T('Coverage waitlist ({n} not yet contacted)', { n: waiting.length }) : T('Coverage waitlist')}</span></div>
+  <div class="faint" style="margin:6px 0 10px">${T('Companies who found the recruiting page from outside a live area. Where they cluster is where to open next.')}</div>
   ${rows.length ? rows.map(r=>`
     <div class="card" style="${r.contacted ? 'opacity:.55' : ''}">
       <div class="row"><div>
         <b class="mini k">${esc(r.company)}</b>${r.trade ? ` <span class="pill red" style="font-size:9.5px">${esc(r.trade.toUpperCase())}</span>` : ''}
-        <div class="faint">${[r.city, r.state].filter(Boolean).map(esc).join(', ') || 'no location given'}
+        <div class="faint">${[r.city, r.state].filter(Boolean).map(esc).join(', ') || T('no location given')}
           ${r.contact ? ' · ' + esc(r.contact) : ''}${r.phone ? ' · ' + esc(r.phone) : ''}${r.email ? ' · ' + esc(r.email) : ''}
           · ${timeAgo(r.created_at)}</div>
         ${r.note ? `<div class="mini" style="margin-top:6px">${esc(r.note)}</div>` : ''}
       </div>
       <button class="btn ghost" style="width:auto; padding:9px 14px; font-size:12px" onclick="toggleWaitlist(${r.id})">
-        ${r.contacted ? 'Mark not contacted' : 'Mark contacted'}</button></div>
-    </div>`).join('') : '<div class="card"><span class="muted">Nobody on the waitlist yet</span></div>'}`;
+        ${T(r.contacted ? 'Mark not contacted' : 'Mark contacted')}</button></div>
+    </div>`).join('') : `<div class="card"><span class="muted">${T('Nobody on the waitlist yet')}</span></div>`}`;
 }
 async function toggleWaitlist(id){
   await api('POST', `/admin/waitlist/${id}/contacted`);
@@ -2365,93 +2882,94 @@ async function toggleWaitlist(id){
 }
 async function vAProvider(){
   const p = await api('GET', '/admin/providers/' + S.adminProviderId);
+  S.adminProviderSnapshot = p;
   const cfg = await api('GET', '/admin/settings').catch(()=>({}));
   const welcome = Math.max(0, Number(cfg.welcome_credits ?? 5) || 0);
   const v = p.verification || {};
   const svcCount = Object.values(p.services || {}).reduce((a,b)=>a+(b?.length||0),0);
   const missing = [];
-  if (!p.name) missing.push('business name');
-  if (!p.dispatch_phone) missing.push('dispatch phone');
-  if (!p.email) missing.push('dispatch email');
-  if (!p.locations.length) missing.push('service location');
-  if (!svcCount) missing.push('services offered');
-  if (!v.license) missing.push('license number');
-  if (!v.coi_file) missing.push('certificate of insurance');
+  if (!p.name) missing.push(T('business name'));
+  if (!p.dispatch_phone) missing.push(T('dispatch phone'));
+  if (!p.email) missing.push(T('dispatch email'));
+  if (!p.locations.length) missing.push(T('service location'));
+  if (!svcCount) missing.push(T('services offered'));
+  if (!v.license) missing.push(T('license number'));
+  if (!v.coi_file) missing.push(T('certificate of insurance'));
   if (!v.w9_file) missing.push('W-9');
   return `
-  <button class="back" onclick="nav('a-providers')">${ic('chevL',15)} All providers</button>
+  <button class="back" onclick="nav('a-providers')">${ic('chevL',15)} ${T('All providers')}</button>
   <div class="row" style="margin-top:8px; flex-wrap:wrap; gap:8px">
     <h2 class="scr" style="margin:0">${esc(p.name || '(no name yet)')}</h2>
     <span style="display:inline-flex; gap:6px">
-      ${p.license_verified ? '<span class="pill dark">LICENSE VERIFIED</span>' : '<span class="pill gray">LICENSE NOT VERIFIED</span>'}
-      ${p.approved ? '<span class="pill solid">APPROVED</span>' : '<span class="pill red">NEEDS REVIEW</span>'}
+      ${p.license_verified ? `<span class="pill dark">${T('LICENSE VERIFIED')}</span>` : `<span class="pill gray">${T('LICENSE NOT VERIFIED')}</span>`}
+      ${p.approved ? `<span class="pill solid">${T('APPROVED')}</span>` : `<span class="pill red">${T('NEEDS REVIEW')}</span>`}
     </span>
   </div>
-  <p class="scrsub" style="margin-top:4px">Signed up ${timeAgo(p.signed_up)} · ${p.stats.leads_bought} leads bought · ${fmt$(p.stats.spend)} spent</p>
+  <p class="scrsub" style="margin-top:4px">${T('Signed up {when} · {leads} · {amount} spent', { when: timeAgo(p.signed_up), leads: TN(p.stats.leads_bought, '{n} lead bought', '{n} leads bought'), amount: fmt$(p.stats.spend) })}</p>
 
-  ${missing.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} <b class="k">Profile incomplete —</b> missing: ${missing.join(', ')}. You can still approve them; drivers just see less.</div></div>`
-    : `<div class="card"><div class="mini">${ic('check',14)} <b class="k">Profile complete</b> — every onboarding field is filled in.</div></div>`}
+  ${missing.length ? `<div class="card alert"><div class="mini">${ic('warn',14)} ${T('Profile incomplete — missing: {items}. You can still approve them; drivers just see less.', { items: missing.join(', ') })}</div></div>`
+    : `<div class="card"><div class="mini">${ic('check',14)} ${T('Profile complete — every onboarding field is filled in.')}</div></div>`}
 
   <div class="cols2"><div>
   <div class="card">
-    <span class="sec">Contact</span>
+    <span class="sec">${T('Contact')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Account phone</span> &nbsp;${esc(p.phone)}<br>
-      <span class="muted">Dispatch</span> &nbsp;${esc(p.dispatch_phone || '—')}<br>
-      <span class="muted">After hours</span> &nbsp;${esc(p.after_phone || '—')}<br>
-      <span class="muted">Email</span> &nbsp;${esc(p.email || '—')}<br>
-      <span class="muted">Hours</span> &nbsp;${esc(p.hours || '—')}
+      <span class="muted">${T('Account phone')}</span> &nbsp;${esc(p.phone)}<br>
+      <span class="muted">${T('Dispatch')}</span> &nbsp;${esc(p.dispatch_phone || '—')}<br>
+      <span class="muted">${T('After hours')}</span> &nbsp;${esc(p.after_phone || '—')}<br>
+      <span class="muted">${T('Email')}</span> &nbsp;${esc(p.email || '—')}<br>
+      <span class="muted">${T('Hours')}</span> &nbsp;${esc(p.hours || '—')}
     </div>
   </div>
   <div class="card">
-    <span class="sec">Coverage (${p.locations.length})</span>
-    ${p.locations.map(l=>`<div class="checkrow"><span class="cico on">${ic('pin',15)}</span><div class="mini"><b class="k">${esc(l.label)}</b><div class="faint">${l.radius_mi} mi radius · ${l.lat.toFixed(3)}, ${l.lng.toFixed(3)}${l.phone ? ' · '+esc(l.phone) : ''}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">No locations — they will never match a lead</div>'}
+    <span class="sec">${T('Coverage ({n})', { n: p.locations.length })}</span>
+    ${p.locations.map(l=>`<div class="checkrow"><span class="cico on">${ic('pin',15)}</span><div class="mini"><b class="k">${esc(l.label)}</b><div class="faint">${T('{n} mi radius', { n: l.radius_mi })} · ${l.lat.toFixed(3)}, ${l.lng.toFixed(3)}${l.phone ? ' · '+esc(l.phone) : ''}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No locations — they will never match a lead')}</div>`}
   </div>
   <div class="card">
-    <span class="sec">Services offered (${svcCount})</span>
+    <span class="sec">${T('Services offered ({n})', { n: svcCount })}</span>
     ${Object.entries(p.services||{}).filter(([,x])=>x?.length).map(([cat,items])=>`
-      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(cat)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || '<div class="faint" style="margin-top:8px">None selected</div>'}
-    ${p.custom.length ? `<div class="checkrow"><span class="cico">${ic('plus',15)}</span><div class="mini"><b class="k">Custom requests</b><div class="faint">${p.custom.map(c=>esc(c.name)+' ('+c.status+')').join(' · ')}</div></div></div>` : ''}
+      <div class="checkrow"><span class="cico on">${ic('check',15)}</span><div class="mini"><b class="k">${esc(cat)}</b><div class="faint">${items.map(esc).join(' · ')}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('None selected')}</div>`}
+    ${p.custom.length ? `<div class="checkrow"><span class="cico">${ic('plus',15)}</span><div class="mini"><b class="k">${T('Custom requests')}</b><div class="faint">${p.custom.map(c=>esc(c.name)+' ('+c.status+')').join(' · ')}</div></div></div>` : ''}
   </div>
   <div class="card">
-    <span class="sec">Equipment</span>
+    <span class="sec">${T('Equipment')}</span>
     <div class="mini" style="margin-top:6px; line-height:1.8">${Object.entries(p.equipment||{}).filter(([,x])=>x).map(([k,x])=>`${esc(k)}: <b class="k">${esc(x)}</b>`).join(' · ') || '—'}</div>
   </div>
   <div class="card">
-    <span class="sec">Capabilities claimed</span>
+    <span class="sec">${T('Capabilities claimed')}</span>
     <div class="chips" style="margin-top:8px">
-      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${esc(label)}</span>`).join('') || '<span class="faint">None set</span>'}
+      ${CAPS.filter(([k])=>p.capabilities?.[k]).map(([,label])=>`<span class="pill dark">${T(label)}</span>`).join('') || `<span class="faint">${T('None set')}</span>`}
     </div>
   </div>
   </div><div>
 
   <div class="card" style="border-color:var(--red)">
-    <span class="sec">License & documents</span>
+    <span class="sec">${T('License & documents')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">License #</span> &nbsp;${v.license ? '<b class="k">'+esc(v.license)+'</b>' : '<span style="color:var(--muted)">not provided</span>'}<br>
-      <span class="muted">Insurance (COI)</span> &nbsp;${v.coi_file ? `<a href="${esc(v.coi_file)}" target="_blank">open document ›</a>` : '<span style="color:var(--muted)">not uploaded</span>'}<br>
-      <span class="muted">W-9</span> &nbsp;${v.w9_file ? `<a href="${esc(v.w9_file)}" target="_blank">open document ›</a>` : '<span style="color:var(--muted)">not uploaded</span>'}<br>
-      <span class="muted">Verified on</span> &nbsp;${p.license_verified_at ? new Date(p.license_verified_at).toLocaleDateString() : '—'}
+      <span class="muted">${T('License #')}</span> &nbsp;${v.license ? '<b class="k">'+esc(v.license)+'</b>' : `<span style="color:var(--muted)">${T('not provided')}</span>`}<br>
+      <span class="muted">${T('Insurance (COI)')}</span> &nbsp;${v.coi_file ? `<a href="${esc(v.coi_file)}" target="_blank">${T('open document')} ›</a>` : `<span style="color:var(--muted)">${T('not uploaded')}</span>`}<br>
+      <span class="muted">${T('W-9')}</span> &nbsp;${v.w9_file ? `<a href="${esc(v.w9_file)}" target="_blank">${T('open document')} ›</a>` : `<span style="color:var(--muted)">${T('not uploaded')}</span>`}<br>
+      <span class="muted">${T('Verified on')}</span> &nbsp;${p.license_verified_at ? new Date(p.license_verified_at).toLocaleDateString() : '—'}
     </div>
     <div style="height:12px"></div>
     ${p.license_verified
-      ? `<button class="btn ghost" onclick="adminLicense(${p.user_id}, false)">Remove license verification</button>`
-      : `<button class="btn dark" onclick="adminLicense(${p.user_id}, true)">${ic('check',15)} Mark license as verified</button>`}
-    <div class="faint" style="margin-top:8px; line-height:1.5">Verified companies also receive requests from drivers who chose "licensed companies only." Approval and license verification are separate — an unlicensed company can still work on RIGRX.</div>
+      ? `<button class="btn ghost" onclick="adminLicense(${p.user_id}, false)">${T('Remove license verification')}</button>`
+      : `<button class="btn dark" onclick="adminLicense(${p.user_id}, true)">${ic('check',15)} ${T('Mark license as verified')}</button>`}
+    <div class="faint" style="margin-top:8px; line-height:1.5">${T('Verified companies also receive requests from drivers who chose "licensed companies only." Approval and license verification are separate — an unlicensed company can still work on RIGRX.')}</div>
   </div>
 
   <div class="card" style="border-color:#1a7f43">
-    <span class="sec">Free lead credits</span>
+    <span class="sec">${T('Free lead credits')}</span>
     <div class="row" style="margin-top:8px">
-      <span class="mini">Balance</span>
+      <span class="mini">${T('Balance')}</span>
       <b class="k" style="font-size:20px; color:${p.lead_credits > 0 ? '#14603a' : 'var(--muted)'}">${p.lead_credits || 0}</b>
     </div>
-    <div class="faint" style="margin:6px 0 10px; line-height:1.5">Credits are spent automatically before their card is ever charged — this is how the "first leads free" beta offer is delivered. They get a text when you grant them. The welcome amount is set on the <a onclick="nav('a-pricing')">Pricing</a> page; the box below is for special cases.</div>
+    <div class="faint" style="margin:6px 0 10px; line-height:1.5">${T('Credits are spent automatically before their card is ever charged — this is how the "first leads free" beta offer is delivered. They get a text when you grant them. The welcome amount is set on the Pricing page; the box below is for special cases.')}</div>
     <div class="row" style="gap:8px; flex-wrap:wrap">
       ${welcome > 0 ? `<button class="btn dark" style="width:auto; padding:10px 14px; font-size:12.5px" onclick="grantCredits(${p.user_id}, ${welcome})">+${welcome} beta welcome</button>` : ''}
       <span style="display:inline-flex; gap:6px; align-items:center">
         <input type="text" id="cr-amt" placeholder="±" inputmode="numeric" style="width:64px; padding:9px">
-        <button class="btn ghost" style="width:auto; padding:10px 14px; font-size:12.5px" onclick="grantCredits(${p.user_id}, null)">Apply</button>
+        <button class="btn ghost" style="width:auto; padding:10px 14px; font-size:12.5px" onclick="grantCredits(${p.user_id}, null)">${T('Apply')}</button>
       </span>
     </div>
     ${(p.credit_log||[]).length ? `<div class="divider"></div>
@@ -2459,36 +2977,36 @@ async function vAProvider(){
   </div>
 
   <div class="card">
-    <span class="sec">Platform access</span>
-    <div class="faint" style="margin:6px 0 10px; line-height:1.5">Approved companies see leads and can buy them. Suspending stops both immediately.</div>
+    <span class="sec">${T('Platform access')}</span>
+    <div class="faint" style="margin:6px 0 10px; line-height:1.5">${T('Approved companies see leads and can buy them. Suspending stops both immediately.')}</div>
     ${p.approved
-      ? `<button class="btn ghost" onclick="adminProv(${p.user_id},'reject')">Suspend this company</button>`
-      : `<button class="btn" onclick="adminProv(${p.user_id},'approve')">${ic('check',16)} Approve — allow them to buy leads</button>`}
+      ? `<button class="btn ghost" onclick="adminProv(${p.user_id},'reject')">${T('Suspend this company')}</button>`
+      : `<button class="btn" onclick="adminProv(${p.user_id},'approve')">${ic('check',16)} ${T('Approve — allow them to buy leads')}</button>`}
   </div>
 
   ${archiveCard(p.user_id, 'company', p.archived_at, p.archive_reason)}
 
   <div class="card">
-    <span class="sec">Private notes (only you see these)</span>
-    <textarea rows="3" id="adm-notes" placeholder="e.g. spoke with the owner, insurance checks out">${esc(p.admin_notes)}</textarea>
+    <span class="sec">${T('Private notes (only you see these)')}</span>
+    <textarea rows="3" id="adm-notes" placeholder="${T('e.g. spoke with the owner, insurance checks out')}">${esc(p.admin_notes)}</textarea>
     <div style="height:8px"></div>
-    <button class="btn ghost" onclick="saveAdminNotes(${p.user_id})">Save notes</button>
+    <button class="btn ghost" onclick="saveAdminNotes(${p.user_id})">${T('Save notes')}</button>
   </div>
 
-  ${p.reviews.length ? `<div class="card"><span class="sec">Recent driver reviews</span>
+  ${p.reviews.length ? `<div class="card"><span class="sec">${T('Recent driver reviews')}</span>
     ${p.reviews.map(r=>`<div class="checkrow"><div><div>${star5(r.stars)} <span class="faint">${timeAgo(r.created_at)}</span></div>${r.comment?`<div class="mini" style="margin-top:3px">"${esc(r.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
   </div></div>`;
 }
 async function saveWelcomeCredits(){
   const r = await api('PUT', '/admin/settings/welcome-credits', { value: qv('set-welcome') });
-  toast(`Welcome button now grants ${r.welcome_credits} free lead${r.welcome_credits===1?'':'s'}`);
+  toast(TN(r.welcome_credits, 'Welcome button now grants {n} free lead', 'Welcome button now grants {n} free leads'));
   render();
 }
 async function grantCredits(id, amount){
   const delta = amount != null ? amount : Number(qv('cr-amt'));
   if (!delta) return toast('Enter how many credits (use a minus sign to take back)');
   const r = await api('POST', `/admin/providers/${id}/credits`, { delta, reason: delta > 0 ? 'Beta welcome — first leads free' : 'Adjustment' });
-  toast(`Balance is now ${r.lead_credits} free lead${r.lead_credits===1?'':'s'}`);
+  toast(TN(r.lead_credits, 'Balance is now {n} free lead', 'Balance is now {n} free leads'));
   render();
 }
 async function adminProv(id, action){
@@ -2500,32 +3018,35 @@ async function adminLicense(id, verified){
   toast(verified ? 'License verified — they now get licensed-only leads' : 'License verification removed'); render();
 }
 async function saveAdminNotes(id){
-  await api('POST', `/admin/providers/${id}/notes`, { notes: qv('adm-notes') });
-  toast('Notes saved');
+  const draftKey = formProgressKey('a-provider');
+  const notes = qv('adm-notes');
+  await api('POST', `/admin/providers/${id}/notes`, { notes });
+  clearFormProgressKey(draftKey);
+  toast('Notes saved', true);
 }
 async function vAPricing(){
   const rows = await api('GET', '/admin/pricing');
   const cfg = await api('GET', '/admin/settings').catch(()=>({}));
   return `
-  <h2 class="scr">Lead Pricing</h2>
-  <p class="scrsub">Per service type — standard slots (×3) and the premium 4th slot</p>
+  <h2 class="scr">${T('Lead Pricing')}</h2>
+  <p class="scrsub">${T('Per service type — standard slots (×3) and the premium 4th slot')}</p>
   <div class="card" style="border-color:#1a7f43">
     <div class="row" style="flex-wrap:wrap; gap:10px">
-      <div><b class="mini k">Beta welcome credits</b>
-        <div class="faint" style="margin-top:3px; line-height:1.5">What the one-tap welcome button on a company's page grants. Set it to 0 to hide the button — every grant is still manual, per company, and logged.</div>
+      <div><b class="mini k">${T('Beta welcome credits')}</b>
+        <div class="faint" style="margin-top:3px; line-height:1.5">${T("What the one-tap welcome button on a company's page grants. Set it to 0 to hide the button — every grant is still manual, per company, and logged.")}</div>
       </div>
       <span style="display:inline-flex; gap:8px; align-items:center">
         <input type="text" id="set-welcome" inputmode="numeric" value="${esc(cfg.welcome_credits ?? '5')}" style="width:70px; padding:8px">
-        <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="saveWelcomeCredits()">Save</button>
+        <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="saveWelcomeCredits()">${T('Save')}</button>
       </span>
     </div>
   </div>
   ${rows.map(p=>`<div class="card">
     <div class="row" style="flex-wrap:wrap; gap:10px"><b class="mini k" style="min-width:180px">${esc(p.label)}</b>
       <span style="display:inline-flex; gap:8px; align-items:center">
-        <span class="faint">Standard $</span><input type="text" id="std-${p.service_key}" value="${p.standard_cents/100}" style="width:70px; padding:8px">
-        <span class="faint">Premium $</span><input type="text" id="prm-${p.service_key}" value="${p.premium_cents/100}" style="width:70px; padding:8px">
-        <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="savePrice('${p.service_key}')">Save</button>
+        <span class="faint">${T('Standard $')}</span><input type="text" id="std-${p.service_key}" value="${p.standard_cents/100}" style="width:70px; padding:8px">
+        <span class="faint">${T('Premium $')}</span><input type="text" id="prm-${p.service_key}" value="${p.premium_cents/100}" style="width:70px; padding:8px">
+        <button class="btn dark" style="width:auto; padding:9px 14px; font-size:12px" onclick="savePrice('${p.service_key}')">${T('Save')}</button>
       </span></div></div>`).join('')}`;
 }
 async function savePrice(key){
@@ -2537,22 +3058,25 @@ async function savePrice(key){
 async function vAPurchases(){
   const w = S.adminSalesWindow || '';
   const rows = await api('GET', '/admin/purchases' + (w === '24h' ? '?window=24h' : ''));
-  const total = rows.filter(x=>!x.refunded).reduce((a,x)=>a+x.amount_cents,0);
+  const sales = rows.filter(x=>x.status === 'succeeded');
+  const total = sales.filter(x=>!x.refunded).reduce((a,x)=>a+x.amount_cents,0);
   return `
-  <h2 class="scr">Lead Sales${w === '24h' ? ' — last 24 hours' : ''}</h2>
-  <p class="scrsub">${fmt$(total)} from ${rows.length} sale${rows.length===1?'':'s'} · click a sale to open the request behind it</p>
+  <h2 class="scr">${T(w === '24h' ? 'Lead Sales — last 24 hours' : 'Lead Sales')}</h2>
+  <p class="scrsub">${T('{total} from {sales} · click a sale to open the request behind it', { total: fmt$(total), sales: TN(sales.length, '{n} sale', '{n} sales') })}</p>
   <div class="chips" style="margin-bottom:14px">
     ${[['','All time'],['24h','Last 24h']].map(([v,l])=>
-      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-purchases',{adminSalesWindow:'${v}'})">${l}</span>`).join('')}
+      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-purchases',{adminSalesWindow:'${v}'})">${T(l)}</span>`).join('')}
   </div>
-  ${rows.map(x=>`<div class="card click" onclick="nav('a-request',{adminRequestId:${x.request_id}})">
+  ${rows.map(x=>`<div class="card">
     <div class="row">
-      <div>
-        <b class="mini k">${fmt$(x.amount_cents)} — ${esc(x.provider_name)}${x.won?' <span class="pill solid" style="font-size:9px">WON THE JOB</span>':''}</b>
-        <div class="faint">Request #${x.request_id} · ${esc(x.service_label)} · ${esc(x.area_label)} · from ${esc(x.driver_name || 'driver')} · slot ${x.slot}${x.premium?' (premium)':''} · ${timeAgo(x.created_at)}</div>
-      </div>
-      ${x.refunded ? '<span class="pill gray">REFUNDED</span>' : `<button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="event.stopPropagation();adminRefund(${x.id})">Refund</button>`}
-    </div></div>`).join('') || '<div class="card" style="text-align:center"><span class="muted">No sales yet</span></div>'}`;
+      <button type="button" class="purchase-open" onclick="nav('a-request',{adminRequestId:${x.request_id}})">
+        <b class="mini k">${fmt$(x.amount_cents)} — ${esc(x.provider_name)}${x.won?` <span class="pill solid" style="font-size:9px">${T('WON THE JOB')}</span>`:''}</b>
+        <span class="faint">${T('Request #')}${x.request_id} · ${esc(x.service_label)} · ${esc(x.area_label)} · ${T('from')} ${esc(x.driver_name || T('driver'))} · ${T('slot')} ${x.slot}${x.premium?' ('+T('premium')+')':''} · ${timeAgo(x.created_at)}</span>
+      </button>
+      ${x.refunded ? `<span class="pill gray">${T('REFUNDED')}</span>`
+        : x.status !== 'succeeded' ? `<span class="pill gray">${esc(x.status.toUpperCase())}</span>`
+        : `<button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminRefund(${x.id})">${T('Refund')}</button>`}
+  </div></div>`).join('') || `<div class="card" style="text-align:center"><span class="muted">${T('No sales yet')}</span></div>`}`;
 }
 async function adminRefund(id){
   await api('POST', `/admin/purchases/${id}/refund`);
@@ -2561,18 +3085,18 @@ async function adminRefund(id){
 async function vACustom(){
   const rows = await api('GET', '/admin/custom-services');
   return `
-  <h2 class="scr">Requested Services</h2>
-  <p class="scrsub">Services companies asked for that you don't offer yet. Approving adds it to the category you pick, so every company can then select it.</p>
+  <h2 class="scr">${T('Requested Services')}</h2>
+  <p class="scrsub">${T("Services companies asked for that you don't offer yet. Approving adds it to the category you pick, so every company can then select it.")}</p>
   ${rows.map(c=>`<div class="card"><div class="row">
-    <div><b class="mini k">"${esc(c.name)}"</b><div class="faint">by ${esc(c.provider_name)} · ${esc(c.status)}</div></div>
+    <div><b class="mini k">"${esc(c.name)}"</b><div class="faint">${T('by')} ${esc(c.provider_name)} · ${T(c.status)}</div></div>
     ${c.status==='pending' ? `<span style="display:inline-flex;gap:6px; align-items:center; flex-wrap:wrap">
       <select id="cs-cat-${c.id}" style="width:auto; padding:8px">
-        ${(S.catalog||[]).map(cat=>`<option value="${cat.id}">Add under ${esc(cat.label)}</option>`).join('')}
+        ${(S.catalog||[]).map(cat=>`<option value="${cat.id}">${T('Add under {category}', { category: esc(cat.label) })}</option>`).join('')}
       </select>
-      <button class="btn" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'approve')">Approve</button>
-      <button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'reject')">Reject</button></span>`
+      <button class="btn" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'approve')">${T('Approve')}</button>
+      <button class="btn ghost" style="width:auto;padding:8px 12px;font-size:12px" onclick="adminCustom(${c.id},'reject')">${T('Reject')}</button></span>`
     : `<span class="pill ${c.status==='approved'?'solid':'gray'}">${esc(c.status.toUpperCase())}</span>`}
-  </div></div>`).join('') || '<div class="card"><span class="muted">Nothing pending</span></div>'}`;
+  </div></div>`).join('') || `<div class="card"><span class="muted">${T('Nothing pending')}</span></div>`}`;
 }
 async function adminCustom(id, action){
   const catId = action === 'approve' ? Number(qv('cs-cat-' + id)) : null;
@@ -2580,26 +3104,79 @@ async function adminCustom(id, action){
   if (action === 'approve') { await loadCatalog(); toast('Approved and added to the catalog for everyone'); }
   render();
 }
+
+const EXCEPTION_LABELS = {
+  zero_match: 'NO PROVIDERS MATCHED',
+  no_response: 'NO PROVIDER RESPONDED',
+  stalled: 'SELECTED JOB STALLED',
+  assignment_bounced: 'ASSIGNMENT RETURNED',
+  expired: 'REQUEST EXPIRED',
+  notification_failure: 'NOTIFICATION FAILED'
+};
+async function vAExceptions(){
+  const d = await api('GET', '/admin/exceptions');
+  return `
+  <h2 class="scr">${T('Dispatch Exceptions')}</h2>
+  <p class="scrsub">${T('Requests and delivery failures that need a human decision — newest first')}</p>
+  ${d.exceptions.map(e=>`
+    <div class="card ${e.status==='open'?'alert':''}">
+      <div class="row"><div>
+        <b class="mini k"><a onclick="nav('a-request',{adminRequestId:${e.request_id}})">#${e.request_id} · ${esc(e.service_label)} ›</a></b>
+        <div class="faint">${esc(e.driver_name || T('Driver'))} · ${esc(e.area_label)} · ${T('opened')} ${timeAgo(e.created_at)}</div>
+      </div><span class="pill ${e.status==='open'?'red':'dark'}">${esc(EXCEPTION_LABELS[e.type] || e.type.toUpperCase())}</span></div>
+      <div class="mini listline" style="margin-top:10px">
+        <span class="muted">${T('Request')}</span> &nbsp;${T(e.request_status)} / ${T(e.job_state || 'none')}<br>
+        <span class="muted">${T('Alerts')}</span> &nbsp;${TN(e.notified_count, '{n} company', '{n} companies')}<br>
+        ${e.provider_name ? `<span class="muted">${T('Company')}</span> &nbsp;${esc(e.provider_name)}<br>` : ''}
+        ${e.tech_name ? `<span class="muted">${T('Technician')}</span> &nbsp;${esc(e.tech_name)}<br>` : ''}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        ${e.status==='open' ? `<button class="btn ghost" onclick="adminException(${e.id},${e.occurrence},'acknowledge')">${T('Acknowledge')}</button>` : ''}
+        <button class="btn dark" onclick="adminException(${e.id},${e.occurrence},'resolve')">${T('Resolve')}</button>
+      </div>
+    </div>`).join('') || `<div class="card"><span class="muted">${T('No open dispatch exceptions.')}</span></div>`}
+  ${d.notifications.length ? `<div style="height:18px"></div><span class="sec">${T('Notification delivery')}</span>
+    ${d.notifications.map(n=>`<div class="card alert">
+      <div class="row"><div><b class="mini k">${esc(n.event_type)}${n.request_id ? ` · Request #${n.request_id}` : ''}</b>
+        <div class="faint">${TN(n.attempts, '{n} attempt', '{n} attempts')} · ${n.last_error ? esc(n.last_error) : T('Waiting to retry')}</div></div>
+        <span class="pill red">${esc(n.status.toUpperCase())}</span></div>
+      <button class="btn ghost" style="margin-top:10px" onclick="retryNotification(${n.id})">${T('Retry now')}</button>
+    </div>`).join('')}` : ''}`;
+}
+async function adminException(id, occurrence, action){
+  await api('POST', `/admin/exceptions/${id}/${action}`, {
+    resolution: action === 'resolve' ? 'Reviewed and resolved by admin' : '',
+    occurrence
+  });
+  toast(action === 'resolve' ? 'Exception resolved' : 'Exception acknowledged');
+  render();
+}
+async function retryNotification(id){
+  const r = await api('POST', `/admin/notifications/${id}/retry`);
+  toast(r.delivery?.status === 'sent' ? 'Notification delivered' : 'Retry queued');
+  render();
+}
+
 async function vARequests(){
   const w = S.adminReqWindow || '';
   const qs = w === '24h' ? '?window=24h' : w === 'unfilled' ? '?unfilled=1' : w === 'filled' ? '?filled=1' : '';
   const rows = await api('GET', '/admin/requests' + qs);
   const titles = { '24h': 'Requests — last 24 hours', 'unfilled': 'Requests nobody bought', 'filled': 'Requests that sold', '': 'Requests' };
   return `
-  <h2 class="scr">${titles[w]}</h2>
-  <p class="scrsub">Click any request to see everything in it, including all messages</p>
+  <h2 class="scr">${T(titles[w])}</h2>
+  <p class="scrsub">${T('Click any request to see everything in it, including all messages')}</p>
   <div class="chips" style="margin-bottom:14px">
     ${[['','All'],['24h','Last 24h'],['filled','Sold'],['unfilled','Unsold']].map(([v,l])=>
-      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-requests',{adminReqWindow:'${v}'})">${l}</span>`).join('')}
+      `<span class="chip ${w===v?'sel':''}" onclick="nav('a-requests',{adminReqWindow:'${v}'})">${T(l)}</span>`).join('')}
   </div>
   ${rows.map(r=>`<div class="card click" onclick="nav('a-request',{adminRequestId:${r.id}})"><div class="row">
-    <div><b class="mini k">#${r.id} — ${esc(r.service_label)}${r.licensed_only ? ' <span class="pill dark" style="font-size:9px">LICENSED ONLY</span>' : ''}</b>
-    <div class="faint">${esc(r.driver_name || 'driver')} · ${esc(r.area_label)} · ${r.notified_count} notified · ${r.buyers} bought · ${timeAgo(r.created_at)}</div></div>
+    <div><b class="mini k">#${r.id} — ${esc(r.service_label)}${r.licensed_only ? ` <span class="pill dark" style="font-size:9px">${T('LICENSED ONLY')}</span>` : ''}</b>
+    <div class="faint">${esc(r.driver_name || T('driver'))} · ${esc(r.area_label)} · ${T('{n} notified', { n: r.notified_count })} · ${T('{n} bought', { n: r.buyers })} · ${timeAgo(r.created_at)}</div></div>
     <span style="display:inline-flex; gap:8px; align-items:center">
       <span class="pill ${r.revenue_cents?'solid':'gray'}">${fmt$(r.revenue_cents)}</span>
       <span class="pill ${r.status==='open'?'red':'gray'}">${esc(r.status.toUpperCase())}</span>
       <span style="color:var(--red)">${ic('arrowR',16)}</span></span>
-  </div></div>`).join('') || '<div class="card" style="text-align:center"><span class="muted">Nothing here</span></div>'}`;
+  </div></div>`).join('') || `<div class="card" style="text-align:center"><span class="muted">${T('Nothing here')}</span></div>`}`;
 }
 async function vARequest(){
   const d = await api('GET', '/admin/requests/' + S.adminRequestId);
@@ -2611,69 +3188,70 @@ async function vARequest(){
           <b class="k" style="font-size:10.5px; opacity:.75">${m.from_driver ? esc(dr.name || 'Driver') : esc(m.sender_name)}</b><br>
           ${m.quote ? `${ic('tag',13)} QUOTE ${fmt$(m.quote.amount_cents)}${m.quote.eta ? ' · ETA '+esc(fmtEta(m.quote.eta)) : ''}` : esc(m.body)}
           <span class="t">${new Date(m.created_at).toLocaleString()}</span></div>`).join('')}</div>`
-    : '<div class="faint" style="margin-top:8px">No messages in this thread</div>';
+    : `<div class="faint" style="margin-top:8px">${T('No messages in this thread')}</div>`;
   return `
-  <button class="back" onclick="nav('a-requests')">${ic('chevL',15)} All requests</button>
+  <button class="back" onclick="nav('a-requests')">${ic('chevL',15)} ${T('All requests')}</button>
   <div class="row" style="margin-top:8px; flex-wrap:wrap; gap:8px">
     <h2 class="scr" style="margin:0; display:flex; align-items:center; gap:8px">${ic(svcIcon(r.service_key),21)} Request #${r.id}</h2>
     <span style="display:inline-flex; gap:6px">
-      ${r.licensed_only ? '<span class="pill dark">LICENSED ONLY</span>' : ''}
+      ${r.licensed_only ? `<span class="pill dark">${T('LICENSED ONLY')}</span>` : ''}
       <span class="pill ${r.status==='open'?'red':'solid'}">${esc(r.status.toUpperCase())}</span>
     </span>
   </div>
-  <p class="scrsub" style="margin-top:4px">${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${r.notified_count} compan${r.notified_count===1?'y':'ies'} alerted · ${d.buyers.length} bought · <b style="color:var(--red)">${fmt$(d.revenue_cents)} revenue</b></p>
+  <p class="scrsub" style="margin-top:4px">${esc(r.service_label)} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')} · ${T('{n} bought', { n: d.buyers.length })} · <b style="color:var(--red)">${T('{amount} revenue', { amount: fmt$(d.revenue_cents) })}</b></p>
 
   <div class="cols2"><div>
   <div class="card">
-    <span class="sec">Who sent it</span>
+    <span class="sec">${T('Who sent it')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Driver</span> &nbsp;<a onclick="nav('a-driver',{adminDriverId:${r.driver_id}})">${esc(dr.name || 'unnamed')} ›</a><br>
-      <span class="muted">Phone</span> &nbsp;${esc(dr.phone)}<br>
-      <span class="muted">Company</span> &nbsp;${esc(dr.company || '—')}<br>
-      <span class="muted">Type</span> &nbsp;${esc(dr.type || '—')}${dr.rating ? ` · rated ${dr.rating} by providers` : ''}
+      <span class="muted">${T('Driver')}</span> &nbsp;<a onclick="nav('a-driver',{adminDriverId:${r.driver_id}})">${dr.name ? esc(dr.name) : T('unnamed')} ›</a><br>
+      <span class="muted">${T('Phone')}</span> &nbsp;${esc(dr.phone)}<br>
+      <span class="muted">${T('Company')}</span> &nbsp;${esc(dr.company || '—')}<br>
+      <span class="muted">${T('Type')}</span> &nbsp;${esc(dr.type || '—')}${dr.rating ? ` · ${T('rated {rating} by providers', { rating: dr.rating })}` : ''}
     </div>
   </div>
   <div class="card">
-    <span class="sec">What was in the request</span>
+    <span class="sec">${T('What was in the request')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Problem</span> &nbsp;${r.description ? '"'+esc(r.description)+'"' : '<span style="color:var(--muted)">no description given</span>'}<br>
-      <span class="muted">Mobility</span> &nbsp;${r.can_move==='no' ? "Can't move" : r.can_move==='short' ? 'Can limp a short distance' : 'Can move'}<br>
-      <span class="muted">Situation</span> &nbsp;${(r.situation||[]).map(esc).join(' · ') || '—'}<br>
-      <span class="muted">Area shown</span> &nbsp;${esc(r.area_label)}<br>
-      <span class="muted">Exact spot</span> &nbsp;${esc(r.landmark || '—')}<br>
-      <span class="muted">GPS</span> &nbsp;<a href="https://maps.google.com/?q=${r.lat},${r.lng}" target="_blank">${r.lat.toFixed(4)}, ${r.lng.toFixed(4)} ›</a><br>
-      <span class="muted">Photos</span> &nbsp;${(r.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">view</a>`).join(' · ') || 'none'}
+      <span class="muted">${T('Problem')}</span> &nbsp;${r.description ? '"'+esc(r.description)+'"' : `<span style="color:var(--muted)">${T('no description given')}</span>`}<br>
+      <span class="muted">${T('Mobility')}</span> &nbsp;${T(r.can_move==='no' ? "Can't move" : r.can_move==='short' ? 'Can limp a short distance' : 'Can move')}<br>
+      <span class="muted">${T('Situation')}</span> &nbsp;${(r.situation||[]).map(esc).join(' · ') || '—'}<br>
+      <span class="muted">${T('Area shown')}</span> &nbsp;${esc(r.area_label)}<br>
+      <span class="muted">${T('Exact spot')}</span> &nbsp;${esc(r.landmark || '—')}<br>
+      <span class="muted">${T('GPS')}</span> &nbsp;<a href="https://maps.google.com/?q=${r.lat},${r.lng}" target="_blank">${r.lat.toFixed(4)}, ${r.lng.toFixed(4)} ›</a>
+        ${r.location_source === 'manual' ? `<span class="pill red" style="font-size:9px">${T('APPROXIMATE MANUAL LOCATION')}</span>` : ''}<br>
+      <span class="muted">${T('Photos')}</span> &nbsp;${(r.photos||[]).map(p=>`<a href="${esc(p)}" target="_blank">${T('view')}</a>`).join(' · ') || T('none')}
     </div>
   </div>
   <div class="card">
-    <span class="sec">Equipment on the request</span>
+    <span class="sec">${T('Equipment on the request')}</span>
     <div class="mini listline" style="margin-top:6px">
-      <span class="muted">Truck</span> &nbsp;${esc([t.year,t.make,t.model,t.engine,t.color].filter(Boolean).join(' · ') || '—')}<br>
-      <span class="muted">Tires</span> &nbsp;${esc([t.steer,t.drive].filter(Boolean).join(' / ') || '—')}<br>
-      <span class="muted">Trailer</span> &nbsp;${esc([tr.type,tr.len,tr.axles].filter(Boolean).join(' · ') || '—')}<br>
-      <span class="muted">Hazmat</span> &nbsp;${tr.hazmat ? `<span style="color:var(--red);font-weight:700">Class ${esc(tr.hzClass)} · UN ${esc(tr.un)}</span>` : 'No'}
+      <span class="muted">${T('Truck')}</span> &nbsp;${esc([t.year,t.make,t.model,t.engine,t.color].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">${T('Tires')}</span> &nbsp;${esc([t.steer,t.drive].filter(Boolean).join(' / ') || '—')}<br>
+      <span class="muted">${T('Trailer')}</span> &nbsp;${esc([tr.type,tr.len,tr.axles].filter(Boolean).join(' · ') || '—')}<br>
+      <span class="muted">${T('Hazmat')}</span> &nbsp;${tr.hazmat ? `<span style="color:var(--red);font-weight:700">${T('Class')} ${esc(tr.hzClass)} · UN ${esc(tr.un)}</span>` : T('No')}
     </div>
   </div>
-  ${d.reviews.length ? `<div class="card"><span class="sec">Reviews from this job</span>
-    ${d.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">by ${esc(rv.reviewer_name)} · ${timeAgo(rv.created_at)}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
+  ${d.reviews.length ? `<div class="card"><span class="sec">${T('Reviews from this job')}</span>
+    ${d.reviews.map(rv=>`<div class="checkrow"><div><div>${star5(rv.stars)} <span class="faint">${T('by')} ${esc(rv.reviewer_name)} · ${timeAgo(rv.created_at)}</span></div>${rv.comment?`<div class="mini" style="margin-top:3px">"${esc(rv.comment)}"</div>`:''}</div></div>`).join('')}</div>` : ''}
   </div><div>
 
   <div class="card">
-    <span class="sec">Who bought this lead (${d.buyers.length} of 4)</span>
+    <span class="sec">${T('Who bought this lead ({n} of 4)', { n: d.buyers.length })}</span>
     ${d.buyers.map(b=>`
       <div style="border-top:1px solid var(--border); margin-top:10px; padding-top:10px">
         <div class="row">
           <div><b class="mini k"><a onclick="nav('a-provider',{adminProviderId:${b.provider_id}})">${esc(b.provider_name)} ›</a></b>
             <div class="faint">Slot ${b.slot}${b.premium?' (premium)':''} · ${esc(b.provider_phone)} · bought ${timeAgo(b.created_at)}${b.license_verified?' · licensed':''}</div></div>
           <span style="display:inline-flex; gap:6px">
-            ${r.selected_provider===b.provider_id ? '<span class="pill solid">WON</span>' : ''}
-            <span class="pill ${b.refunded?'gray':'dark'}">${b.refunded ? 'REFUNDED' : fmt$(b.amount_cents)}</span>
+            ${r.selected_provider===b.provider_id ? `<span class="pill solid">${T('WON')}</span>` : ''}
+            <span class="pill ${b.refunded?'gray':'dark'}">${b.refunded ? T('REFUNDED') : fmt$(b.amount_cents)}</span>
           </span>
         </div>
         ${thread(b.thread)}
-      </div>`).join('') || '<div class="faint" style="margin-top:8px">Nobody bought this lead — it was alerted to ' + r.notified_count + ' companies</div>'}
+  </div>`).join('') || `<div class="faint" style="margin-top:8px">${T('Nobody bought this lead — it was alerted to {n} companies', { n: r.notified_count })}</div>`}
   </div>
-  ${d.orphan_threads.length ? `<div class="card"><span class="sec">Other message threads</span>
+  ${d.orphan_threads.length ? `<div class="card"><span class="sec">${T('Other message threads')}</span>
     ${d.orphan_threads.map(o=>thread(o.thread)).join('')}</div>` : ''}
   </div></div>`;
 }
@@ -2686,29 +3264,29 @@ async function vACatalog(){
   const cats = await api('GET', '/catalog?all=1');
   S.catalogAdmin = cats;
   return `
-  <h2 class="scr">Services</h2>
-  <p class="scrsub">Everything here drives the app: what drivers can request, what companies can offer, and how the two get matched.</p>
+  <h2 class="scr">${T('Services')}</h2>
+  <p class="scrsub">${T('Everything here drives the app: what drivers can request, what companies can offer, and how the two get matched.')}</p>
 
   <div class="card" style="border-style:dashed">
-    <span class="sec">Add a category</span>
+    <span class="sec">${T('Add a category')}</span>
     <div class="grid2" style="margin-top:10px">
-      <div><label class="f" style="margin-top:0">Name</label><input type="text" id="nc-label" placeholder="Auto Glass Repair"></div>
-      <div><label class="f" style="margin-top:0">One-line description</label><input type="text" id="nc-blurb" placeholder="Windshields, chips, mirrors"></div>
+      <div><label class="f" style="margin-top:0">${T('Name')}</label><input type="text" id="nc-label" placeholder="${T('Auto Glass Repair')}"></div>
+      <div><label class="f" style="margin-top:0">${T('One-line description')}</label><input type="text" id="nc-blurb" placeholder="${T('Windshields, chips, mirrors')}"></div>
     </div>
     <div class="grid2">
-      <div><label class="f">Lead price $</label><input type="text" id="nc-std" value="25"></div>
-      <div><label class="f">Premium 4th slot $</label><input type="text" id="nc-prem" value="50"></div>
+      <div><label class="f">${T('Lead price $')}</label><input type="text" id="nc-std" value="25"></div>
+      <div><label class="f">${T('Premium 4th slot $')}</label><input type="text" id="nc-prem" value="50"></div>
     </div>
-    <label class="f">Icon</label>
+    <label class="f">${T('Icon')}</label>
     <div class="chips" id="nc-icon">
       ${ICON_CHOICES.map((n,i)=>`<span class="chip ${i===7?'sel':''}" data-icon="${n}" onclick="togOne(this)">${ic(n,16)}</span>`).join('')}
     </div>
-    <label class="f">Show on the driver's request screen?</label>
+    <label class="f">${T("Show on the driver's request screen?")}</label>
     <div class="chips" id="nc-visible">
-      <span class="chip sel" onclick="togOne(this)">Yes</span><span class="chip" onclick="togOne(this)">Providers only</span>
+      <span class="chip sel" data-v="1" onclick="togOne(this)">${T('Yes')}</span><span class="chip" data-v="0" onclick="togOne(this)">${T('Providers only')}</span>
     </div>
     <div style="height:12px"></div>
-    <button class="btn" onclick="addCategory()">${ic('plus',16)} Add category</button>
+    <button class="btn" onclick="addCategory()">${ic('plus',16)} ${T('Add category')}</button>
   </div>
 
   ${cats.map(c=>`
@@ -2716,38 +3294,38 @@ async function vACatalog(){
     <div class="row" style="flex-wrap:wrap; gap:8px">
       <b class="mini k" style="display:inline-flex; align-items:center; gap:8px; font-size:14px">${ic(c.icon,17)} ${esc(c.label)}</b>
       <span style="display:inline-flex; gap:6px; align-items:center">
-        ${c.driver_visible ? '<span class="pill red">DRIVERS SEE IT</span>' : '<span class="pill gray">PROVIDERS ONLY</span>'}
-        <span class="pill dark">${c.standard_cents!=null ? fmt$(c.standard_cents) : 'no price'}${c.premium_cents!=null ? ' / '+fmt$(c.premium_cents) : ''}</span>
-        ${c.active ? '' : '<span class="pill gray">OFF</span>'}
+        ${c.driver_visible ? `<span class="pill red">${T('DRIVERS SEE IT')}</span>` : `<span class="pill gray">${T('PROVIDERS ONLY')}</span>`}
+        <span class="pill dark">${c.standard_cents!=null ? fmt$(c.standard_cents) : T('no price')}${c.premium_cents!=null ? ' / '+fmt$(c.premium_cents) : ''}</span>
+        ${c.active ? '' : `<span class="pill gray">${T('OFF')}</span>`}
       </span>
     </div>
-    <div class="faint" style="margin-top:4px">${esc(c.blurb || 'no description')} · key <code style="font-size:11px">${esc(c.key)}</code></div>
+    <div class="faint" style="margin-top:4px">${c.blurb ? esc(c.blurb) : T('no description')} · ${T('key')} <code style="font-size:11px">${esc(c.key)}</code></div>
 
     <div class="chips" style="margin-top:10px">
       ${c.items.map(i=>`<span class="chip sel">${esc(i.label)} <span style="cursor:pointer; opacity:.6" onclick="removeItem(${i.id})">✕</span></span>`).join('')
-        || '<span class="faint">No services under this category yet — add one below</span>'}
+        || `<span class="faint">${T('No services under this category yet — add one below')}</span>`}
     </div>
     <div class="row" style="gap:8px; margin-top:10px">
-      <input type="text" id="ni-${c.id}" placeholder="Add a service, e.g. Windshield replacement" style="flex:1">
-      <button class="btn dark" style="width:auto; padding:11px 15px; font-size:12.5px" onclick="addItem(${c.id})">Add</button>
+      <input type="text" id="ni-${c.id}" placeholder="${T('Add a service, e.g. Windshield replacement')}" style="flex:1">
+      <button class="btn dark" style="width:auto; padding:11px 15px; font-size:12.5px" onclick="addItem(${c.id})">${T('Add')}</button>
     </div>
 
     <div class="divider"></div>
     <div class="row" style="flex-wrap:wrap; gap:8px">
       <span style="display:inline-flex; gap:8px; align-items:center; flex-wrap:wrap">
-        <span class="faint">Name</span><input type="text" id="ec-label-${c.id}" value="${esc(c.label)}" style="width:150px; padding:8px">
+        <span class="faint">${T('Name')}</span><input type="text" id="ec-label-${c.id}" value="${esc(c.label)}" style="width:150px; padding:8px">
         <span class="faint">$</span><input type="text" id="ec-std-${c.id}" value="${c.standard_cents!=null?c.standard_cents/100:25}" style="width:56px; padding:8px">
-        <span class="faint">prem $</span><input type="text" id="ec-prem-${c.id}" value="${c.premium_cents!=null?c.premium_cents/100:50}" style="width:56px; padding:8px">
-        <button class="btn dark" style="width:auto; padding:9px 13px; font-size:12px" onclick="saveCategory(${c.id})">Save</button>
+        <span class="faint">${T('prem $')}</span><input type="text" id="ec-prem-${c.id}" value="${c.premium_cents!=null?c.premium_cents/100:50}" style="width:56px; padding:8px">
+        <button class="btn dark" style="width:auto; padding:9px 13px; font-size:12px" onclick="saveCategory(${c.id})">${T('Save')}</button>
       </span>
       <span style="display:inline-flex; gap:6px">
-        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'driver_visible',${!c.driver_visible})">${c.driver_visible?'Hide from drivers':'Show to drivers'}</button>
-        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'active',${!c.active})">${c.active?'Turn off':'Turn on'}</button>
+        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'driver_visible',${!c.driver_visible})">${T(c.driver_visible?'Hide from drivers':'Show to drivers')}</button>
+        <button class="btn ghost" style="width:auto; padding:9px 13px; font-size:12px" onclick="toggleCat(${c.id},'active',${!c.active})">${T(c.active?'Turn off':'Turn on')}</button>
       </span>
     </div>
   </div>`).join('')}
   <div class="card" style="background:var(--soft)">
-    <div class="mini" style="line-height:1.55">${ic('warn',14)} Categories get turned off rather than deleted, so past requests keep their labels and your revenue reports stay intact. A new category reaches nobody until service companies check something under it — so add them as demand shows up.</div>
+    <div class="mini" style="line-height:1.55">${ic('warn',14)} ${T('Categories get turned off rather than deleted, so past requests keep their labels and your revenue reports stay intact. A new category reaches nobody until service companies check something under it — so add them as demand shows up.')}</div>
   </div>
   ${await otherEntriesCard()}`;
 }
@@ -2766,11 +3344,11 @@ async function otherEntriesCard(){
   })[f] || f;
   return `
   <div class="card">
-    <span class="sec">"Other" answers — what the dropdowns are missing</span>
-    <div class="faint" style="margin:6px 0 12px">Every time someone picks "Other…" and types their own answer, it lands here. Anything showing up repeatedly belongs in the built-in list.</div>
-    ${rows.length ? `<table class="tbl"><tr><th>Field</th><th>What they typed</th><th>Class</th><th>Times</th><th>Last seen</th></tr>
-      ${rows.map(r=>`<tr><td>${esc(label(r.field))}</td><td><b class="k">${esc(r.value)}</b></td><td>${esc(r.duty_class||'—')}</td><td>${r.times > 1 ? `<span class="pill red">${r.times}</span>` : r.times}</td><td class="faint">${timeAgo(r.last_seen)}</td></tr>`).join('')}
-    </table>` : '<div class="faint">Nothing yet — the lists are covering everyone so far.</div>'}
+    <span class="sec">${T('"Other" answers — what the dropdowns are missing')}</span>
+    <div class="faint" style="margin:6px 0 12px">${T('Every time someone picks "Other…" and types their own answer, it lands here. Anything showing up repeatedly belongs in the built-in list.')}</div>
+    ${rows.length ? `<table class="tbl"><tr><th>${T('Field')}</th><th>${T('What they typed')}</th><th>${T('Class')}</th><th>${T('Times')}</th><th>${T('Last seen')}</th></tr>
+      ${rows.map(r=>`<tr><td>${esc(T(label(r.field)))}</td><td><b class="k">${esc(r.value)}</b></td><td>${esc(r.duty_class||'—')}</td><td>${r.times > 1 ? `<span class="pill red">${r.times}</span>` : r.times}</td><td class="faint">${timeAgo(r.last_seen)}</td></tr>`).join('')}
+    </table>` : `<div class="faint">${T('Nothing yet — the lists are covering everyone so far.')}</div>`}
   </div>`;
 }
 async function addCategory(){
@@ -2780,10 +3358,10 @@ async function addCategory(){
     label, blurb: qv('nc-blurb'),
     standard: qv('nc-std'), premium: qv('nc-prem'),
     icon: $('nc-icon').querySelector('.chip.sel')?.dataset.icon || 'box',
-    driver_visible: $('nc-visible').querySelector('.chip.sel')?.textContent.trim() === 'Yes'
+    driver_visible: $('nc-visible').querySelector('.chip.sel')?.dataset.v === '1'
   });
   await loadCatalog();
-  toast('"' + label + '" added — now add the services under it');
+  toast(T('"{label}" added — now add the services under it', { label }));
   render();
 }
 async function saveCategory(id){
@@ -2818,7 +3396,7 @@ const VIEWS = {
   'p-stats': vPStats, 'p-reviews': vPReviews, 'p-people': vPPeople, 'p-jobs': vPJobs, 't-jobs': vTechJobs, 'p-settings': vPSettings,
   'a-home': vAHome, 'a-providers': vAProviders, 'a-provider': vAProvider, 'a-pricing': vAPricing,
   'a-purchases': vAPurchases, 'a-custom': vACustom, 'a-catalog': vACatalog, 'a-requests': vARequests, 'a-request': vARequest,
-  'a-drivers': vADrivers, 'a-driver': vADriver, 'a-flags': vAFlags
+  'a-drivers': vADrivers, 'a-driver': vADriver, 'a-flags': vAFlags, 'a-exceptions': vAExceptions
 };
 const AUTH_LAYOUT = new Set(['signin','code','d-setup1','d-setup2','d-setup3','p-setup1','p-setup2','p-setup3','p-setup4','p-setup5','loading']);
 const NAVS = {
@@ -2846,45 +3424,52 @@ const NAVS = {
     {ico:'card', label:'Sales', v:'a-purchases'},
     {ico:'plus', label:'Requested', v:'a-custom'},
     {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']},
+    {ico:'bell', label:'Dispatch', v:'a-exceptions'},
     {ico:'warn', label:'Chat flags', v:'a-flags'}]
 };
 let renderSeq = 0;
+let renderedView = null;
 async function render(){
   const seq = ++renderSeq;
   const root = $('root');
   const fn = VIEWS[S.view];
   // Chat takes over the phone screen — no tab bar, no page scroll behind it.
   document.body.classList.toggle('chatmode', S.view === 'd-chat' || S.view === 'p-chat');
-  if (!fn){ root.innerHTML = authShell(`<div class="card">${T('Page not found.')} <a onclick="nav(homeFor())">${T('Go home')}</a></div>`); return; }
+  if (!fn){ root.innerHTML = authShell(`<div class="card">${T('Page not found.')} <button class="plain-link" onclick="nav(homeFor())">${T('Go home')}</button></div>`); localizeVisible(root); makeControlsAccessible(root); renderedView = S.view; return; }
   let html;
+  const refreshingCurrentView = renderedView === S.view && !!root.firstElementChild;
+  if (!AUTH_LAYOUT.has(S.view) && S.me) {
+    root.setAttribute('aria-busy','true');
+    if (!refreshingCurrentView) root.innerHTML = `<section class="content" aria-label="${T('Loading')}"><section class="card loading-card"><i class="skeleton wide"></i><i class="skeleton"></i><i class="skeleton short"></i></section></section>`;
+  }
   try { html = await fn(); }
-  catch(e){ console.error(e); html = `<div class="card alert" style="margin-top:20px"><div class="mini">Couldn't load this page — check your connection and try again.</div></div>`; }
+  catch(e){ console.error(e); html = `<div class="card alert" role="alert" style="margin-top:20px"><div class="mini">${T("Couldn't load this page — check your connection and try again.")}</div><button class="btn ghost state-action" onclick="render()">${T('Retry')}</button></div>`; }
   if (seq !== renderSeq) return; // a newer navigation happened while loading
-  if (AUTH_LAYOUT.has(S.view) || !S.me){ root.innerHTML = AUTH_LAYOUT.has(S.view) ? html : authShell(html); return; }
+  if (AUTH_LAYOUT.has(S.view) || !S.me){ root.innerHTML = AUTH_LAYOUT.has(S.view) ? html : authShell(html); localizeVisible(root); makeControlsAccessible(root); restoreFormProgress(); root.setAttribute('aria-busy','false'); renderedView = S.view; return; }
   const navKey = S.me.role === 'provider' && (S.me.member_role === 'tech') ? 'tech' : S.me.role;
   const items = (NAVS[navKey] || NAVS.driver)
     .filter(t => !(t.v === 'p-settings' && S.me.member_role === 'dispatcher'))
     .map(t => ({ ...t, act: t.v === S.view || (t.also || []).includes(S.view) }));
   const who = S.me.role === 'provider'
     ? `${esc(S.provider?.name || S.me.name || 'My company')}<br><span class="faint">${
-        S.me.member_role === 'tech' ? esc(S.me.name || 'Technician') + ' · technician'
-        : S.me.member_role === 'dispatcher' ? esc(S.me.name || '') + ' · dispatcher'
-        : (S.provider?.approved ? 'Verified provider' : 'Pending approval')}</span>`
-    : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? 'RIGRX admin' : T('Driver') + ' · ' + esc(S.me.phone)}</span>`;
+        S.me.member_role === 'tech' ? esc(S.me.name || T('Technician')) + ' · ' + T('technician')
+        : S.me.member_role === 'dispatcher' ? esc(S.me.name || '') + ' · ' + T('dispatcher')
+        : T(S.provider?.approved ? 'Verified provider' : 'Pending approval')}</span>`
+    : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? T('RIGRX admin') : T('Driver') + ' · ' + esc(S.me.phone)}</span>`;
   root.innerHTML = `
   <div class="shell">
     <div class="sidebar">
-      <div class="slogo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
+      <div class="slogo click" onclick="nav(homeFor())" title="${T('Back to home')}">RIG<span>RX</span></div>
       ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,19)} ${T(t.label)}</button>`).join('')}
       <div class="spacer"></div>
-      ${S.me.role === 'driver' ? `<button onclick="toggleLang()">${ic('chat',18)} ${getLang() === 'es' ? 'View in English' : 'Ver en español'}</button>` : ''}
+      <button onclick="toggleLang()">${ic('chat',18)} ${getLang() === 'es' ? 'View in English' : 'Ver en español'}</button>
       <button onclick="signOut()">${ic('out',18)} ${T('Sign out')}</button>
       <div class="whoami">${who}</div>
     </div>
     <div class="main">
       <div class="topbar">
-        <div class="logo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
-        <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])}${S.me.role === 'driver' ? ` &nbsp;·&nbsp; <a onclick="toggleLang()">${getLang() === 'es' ? 'EN' : 'ES'}</a>` : ''} &nbsp;·&nbsp; <a onclick="signOut()">${T('Sign out')}</a></div>
+        <div class="logo click" onclick="nav(homeFor())" title="${T('Back to home')}">RIG<span>RX</span></div>
+        <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])} &nbsp;·&nbsp; <button class="plain-link" onclick="toggleLang()">${getLang() === 'es' ? 'EN' : 'ES'}</button> &nbsp;·&nbsp; <button class="plain-link" onclick="signOut()">${T('Sign out')}</button></div>
       </div>
       <div class="content${S.me.role==='driver' ? '' : ' wide'}">${html}</div>
     </div>
@@ -2892,10 +3477,16 @@ async function render(){
   <div class="tabbar">
     ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,21)}${T(t.label)}</button>`).join('')}
   </div>`;
+  localizeVisible(root);
+  makeControlsAccessible(root);
+  restoreFormProgress();
+  root.setAttribute('aria-busy','false');
+  renderedView = S.view;
 }
 
 /* ---------------- boot ---------------- */
 (async function boot(){
+  document.documentElement.lang = getLang();
   await loadCatalog();
   try { await loadMe(); } catch(e){}
   if (S.me) connectWS();
@@ -2909,7 +3500,7 @@ async function render(){
 
 async function toggleSpanishDispatch(on){
   await api('POST', '/provider/spanish-dispatch', { on });
-  await loadMe(); toast(on ? 'Badge on — Spanish-speaking drivers will see it' : 'Badge off'); render();
+  await loadMe(); toast(T(on ? 'Badge on — Spanish-speaking drivers will see it' : 'Badge off')); render();
 }
 
 /* ---------------- card collection (Stripe Elements) ----------------
@@ -2928,23 +3519,25 @@ function loadStripeJs(){
 async function openCardModal(){
   let setup;
   try { setup = await api('POST', '/provider/card-setup'); } catch(e){ return; }
-  try { await loadStripeJs(); } catch(e){ return toast('Could not load the card form — check your connection'); }
-  if (!setup.publishableKey) return toast('Stripe publishable key missing — add STRIPE_PUBLISHABLE_KEY to your secrets');
+  try { await loadStripeJs(); } catch(e){ return toast(T('Could not load the card form — check your connection')); }
+  if (!setup.publishableKey) return toast(T('Stripe publishable key missing — add STRIPE_PUBLISHABLE_KEY to your secrets'));
   const stripe = Stripe(setup.publishableKey);
   const elements = stripe.elements({ clientSecret: setup.clientSecret });
   const el = document.createElement('div');
   el.className = 'modalwrap'; el.id = 'confirmWrap';
   el.innerHTML = `
     <div class="modal">
-      <h3>Add a card</h3>
-      <p>Charged only when you unlock a lead. You can replace it anytime.</p>
+      <h3>${T('Add a card')}</h3>
+      <p>${T('Charged only when you unlock a lead. You can replace it anytime.')}</p>
       <div id="pay-el" style="margin:14px 0"></div>
       <div class="acts">
-        <button class="btn ghost" onclick="closeConfirm()">Cancel</button>
-        <button class="btn" id="saveCardBtn" onclick="saveCardNow()">${ic('check',15)} Save card</button>
+        <button class="btn ghost" onclick="closeConfirm()">${T('Cancel')}</button>
+        <button class="btn" id="saveCardBtn" onclick="saveCardNow()">${ic('check',15)} ${T('Save card')}</button>
       </div>
-      <div class="faint" style="text-align:center; margin-top:10px">Card details go straight to Stripe — RIGRX never sees the number.</div>
+      <div class="faint" style="text-align:center; margin-top:10px">${T('Card details go straight to Stripe — RIGRX never sees the number.')}</div>
     </div>`;
+  localizeVisible(el);
+  makeControlsAccessible(el);
   document.body.appendChild(el);
   const payEl = elements.create('payment');
   payEl.mount('#pay-el');
@@ -2952,15 +3545,15 @@ async function openCardModal(){
 }
 async function saveCardNow(){
   const btn = $('saveCardBtn');
-  btn.disabled = true; btn.textContent = 'Saving…';
+  btn.disabled = true; btn.textContent = T('Saving…');
   const { stripe, elements } = S._stripe || {};
   if (!stripe) return closeConfirm();
   const { setupIntent, error } = await stripe.confirmSetup({ elements, redirect: 'if_required' });
-  if (error){ toast(error.message || 'Card was not accepted'); btn.disabled = false; btn.textContent = 'Save card'; return; }
+  if (error){ toast(error.message || T('Card was not accepted')); btn.disabled = false; btn.textContent = T('Save card'); return; }
   try {
     const r = await api('POST', '/provider/card-saved', { payment_method: setupIntent.payment_method });
     closeConfirm();
-    toast(`Card saved — ${(r.brand || 'card').toUpperCase()} ending ${r.last4}`);
+    toast(T('Card saved — {brand} ending {last4}', { brand: (r.brand || T('card')).toUpperCase(), last4: r.last4 }), true);
     await loadMe(); render();
-  } catch(e){ btn.disabled = false; btn.textContent = 'Save card'; }
+  } catch(e){ btn.disabled = false; btn.textContent = T('Save card'); }
 }

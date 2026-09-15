@@ -1,0 +1,9 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "zE6QPOOCCFiIhIQ9ambcU"
+uri = "file://assets/rigrx-deck.html"
+type = "text"
+title = "RIGRX Overview Deck"
+description = "A slide deck introducing RIGRX — the problem, the marketplace solution, driver/provider/admin flows, and what's under the hood, all in the app's red/grey/white/black brand style."

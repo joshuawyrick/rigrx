@@ -17,6 +17,22 @@ async function one(text, params = []) {
   return rows[0] || null;
 }
 
+async function withTransaction(work, { isolation = 'READ COMMITTED' } = {}) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET TRANSACTION ISOLATION LEVEL ${isolation}`);
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function migrate() {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(sql);
@@ -38,4 +54,4 @@ async function migrate() {
   }
 }
 
-module.exports = { pool, q, one, migrate };
+module.exports = { pool, q, one, withTransaction, migrate };

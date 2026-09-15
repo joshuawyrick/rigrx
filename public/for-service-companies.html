@@ -8,6 +8,7 @@
 <meta property="og:title" content="RIGRX — roadside leads with the whole truck attached">
 <meta property="og:description" content="See the exact failure, the tire size and the hazmat status before you pay. Never more than four buyers per lead. Your first ten are free.">
 <meta property="og:type" content="website">
+<link rel="stylesheet" href="/styles.css?v=__BUILD__">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23e0162b'/><text x='50' y='68' font-size='54' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>R</text></svg>">
 <style>
   *{ box-sizing:border-box; margin:0; padding:0; }
@@ -36,6 +37,8 @@
   .btn.ghost{ background:#fff; color:var(--ink); border:1.5px solid var(--line); box-shadow:none; }
   .btn.big{ font-size:16px; padding:15px 30px; border-radius:13px; }
   nav .btn{ padding:9px 17px; font-size:13.5px; }
+   .lang{min-height:44px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);font:700 12px inherit;padding:0 12px;cursor:pointer;}
+   .lang:focus-visible{outline:3px solid #1f6f78;outline-offset:3px;}
   nav .btn .short{ display:none; }
 
   /* ---------- hero ---------- */
@@ -139,7 +142,7 @@
 <nav>
   <div class="wrap">
     <a class="logo" href="/">RIG<span>RX</span></a>
-    <a class="btn" href="/"><span class="long">Sign up as a service company</span><span class="short">Sign up</span></a>
+    <span style="display:flex;gap:10px;align-items:center"><button class="lang" type="button" id="langToggle" aria-label="Change language">ES</button><a class="btn" href="/"><span class="long">Sign up as a service company</span><span class="short">Sign up</span></a></span>
   </div>
 </nav>
 
@@ -261,40 +264,40 @@
       <p class="sub" style="text-align:center; margin:12px auto 0">Tell us where you run and we'll come to you.
          We'll get in touch before we open your corridor.</p>
 
-      <form class="form" id="wlForm">
+      <form class="form" id="wlForm" novalidate>
         <div class="row">
           <div><label for="wl-company">Company name</label><input id="wl-company" name="company" required autocomplete="organization"></div>
           <div><label for="wl-contact">Your name</label><input id="wl-contact" name="contact" autocomplete="name"></div>
         </div>
         <div class="row">
-          <div><label for="wl-phone">Mobile number</label><input id="wl-phone" name="phone" type="tel" autocomplete="tel" placeholder="(661) 555-0198"></div>
-          <div><label for="wl-email">Email</label><input id="wl-email" name="email" type="email" autocomplete="email"></div>
+          <div><label for="wl-phone">Mobile number</label><input id="wl-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="(661) 555-0198"></div>
+          <div><label for="wl-email">Email</label><input id="wl-email" name="email" type="email" inputmode="email" autocomplete="email"></div>
         </div>
         <div class="row">
-          <div><label for="wl-city">City you're based in</label><input id="wl-city" name="city" autocomplete="address-level2"></div>
+          <div><label for="wl-city">City you're based in</label><input id="wl-city" name="city" required autocomplete="address-level2"></div>
           <div><label for="wl-state">State</label><input id="wl-state" name="state" autocomplete="address-level1" placeholder="CA"></div>
         </div>
         <label for="wl-trade">What's your main line of work?</label>
         <select id="wl-trade" name="trade">
           <option value="">Select…</option>
-          <option>Heavy towing &amp; recovery</option>
-          <option>Commercial tire service</option>
-          <option>Mobile diesel mechanic</option>
-          <option>Trailer &amp; reefer repair</option>
-          <option>Tanker &amp; pump service</option>
-          <option>Fuel &amp; fluid delivery</option>
-          <option>Mobile welding &amp; hydraulics</option>
-          <option>Lockout &amp; glass</option>
-          <option>Something else</option>
+          <option value="Heavy towing &amp; recovery">Heavy towing &amp; recovery</option>
+          <option value="Commercial tire service">Commercial tire service</option>
+          <option value="Mobile diesel mechanic">Mobile diesel mechanic</option>
+          <option value="Trailer &amp; reefer repair">Trailer &amp; reefer repair</option>
+          <option value="Tanker &amp; pump service">Tanker &amp; pump service</option>
+          <option value="Fuel &amp; fluid delivery">Fuel &amp; fluid delivery</option>
+          <option value="Mobile welding &amp; hydraulics">Mobile welding &amp; hydraulics</option>
+          <option value="Lockout &amp; glass">Lockout &amp; glass</option>
+          <option value="Something else">Something else</option>
         </select>
         <label for="wl-note">Which highways or areas do you cover?</label>
         <textarea id="wl-note" name="note" placeholder="e.g. I-40 between Barstow and Kingman, plus 60 miles around Needles"></textarea>
         <button class="btn" type="submit" id="wlBtn">Put me on the list</button>
-        <div class="err" id="wlErr" style="display:none"></div>
+        <div class="err" id="wlErr" role="alert" aria-live="assertive" style="display:none"></div>
         <p class="formnote">We'll only contact you about RIGRX coverage in your area. Nothing else, ever.</p>
       </form>
 
-      <div class="ok" id="wlOk" style="display:none">
+      <div class="ok" id="wlOk" role="status" aria-live="polite" style="display:none">
         <b>You're on the list.</b>
         We'll reach out before we open your area — and if drivers start breaking down near you sooner than that,
         you'll be the first call we make.
@@ -322,16 +325,197 @@
   const form = document.getElementById('wlForm');
   const btn  = document.getElementById('wlBtn');
   const err  = document.getElementById('wlErr');
+  const langToggle = document.getElementById('langToggle');
+  const originalText = new WeakMap();
+  const originalAttributes = new WeakMap();
+  const strings = {
+    es: {
+      'RIGRX for service companies — roadside leads with the whole truck attached':'RIGRX para compañías de servicio — avisos viales con todos los datos del camión',
+      'RIGRX sends tow operators, tire shops and mobile mechanics roadside jobs with the full rig attached — the exact failed tire, its size, the engine, hazmat status — before you pay. Only four companies ever see a lead. First ten leads free.':'RIGRX envía trabajos viales a operadores de grúa, llanteras y mecánicos móviles con todos los datos del equipo — la llanta exacta que falló, su medida, el motor y el estado hazmat — antes de pagar. Solo cuatro compañías ven cada aviso. Los primeros diez son gratis.',
+      'RIGRX — roadside leads with the whole truck attached':'RIGRX — avisos viales con todos los datos del camión',
+      'See the exact failure, the tire size and the hazmat status before you pay. Never more than four buyers per lead. Your first ten are free.':'Vea la falla exacta, la medida de llanta y el estado hazmat antes de pagar. Nunca más de cuatro compradores por aviso. Sus primeros diez son gratis.',
+      'Change language':'Cambiar idioma',
+      'Sign up':'Registrarse',
+      'Founding companies — first 10 leads free':'Compañías fundadoras — primeros 10 avisos gratis',
+      "Stop paying for leads you can't price.":'Deje de pagar por avisos que no puede cotizar.',
+      'Stop paying for leads you':'Deje de pagar por avisos que',
+      "can't price":'no puede cotizar',
+      'When a truck goes down near you, RIGRX texts you the job. You see the whole rig — the exact failed tire,':'Cuando un camión se avería cerca de usted, RIGRX le envía el trabajo por texto. Usted ve todo el equipo — la llanta exacta que falló,',
+      "its size, the engine, whether it's placarded —":'su medida, el motor y si lleva placas hazmat —',
+      'before you pay anything':'antes de pagar nada',
+      "If it's work you want, you unlock the driver and talk to him directly. If it isn't, you skip it and it":'Si es un trabajo que le interesa, desbloquea al chofer y habla directamente con él. Si no le interesa, lo omite y no',
+      'costs you nothing.':'le cuesta nada.',
+      'Get set up — it takes 10 minutes':'Configure su perfil — toma 10 minutos',
+      'No card required  ·  No subscription  ·  No contract':'Sin tarjeta · sin suscripción · sin contrato',
+      'No card required · No subscription · No contract':'Sin tarjeta · sin suscripción · sin contrato',
+      'What you see before you spend a dollar':'Lo que ve antes de gastar un dólar',
+      "Every lead carries the driver's saved rig, so you can decide what to load and what to charge":'Cada aviso incluye el equipo guardado del chofer, para que decida qué cargar y cuánto cobrar',
+      'before you commit a truck. None of it identifies the driver until you buy.':'antes de comprometer un camión. Ningún dato identifica al chofer hasta que usted compra.',
+      'The exact failure':'La falla exacta',
+      'Drive axle 1, driver’s side, outside dual — blowout. Not "needs a tire."':'Eje de tracción 1, lado del conductor, dual exterior — reventón. No solo “necesita una llanta”.',
+      'Drive axle 1, driver\'s side, outside dual — blowout. Not "needs a tire."':'Eje de tracción 1, lado del conductor, dual exterior — reventón. No solo “necesita una llanta”.',
+      'The tire size':'La medida de la llanta',
+      "Pulled from the driver's saved truck, so you load the right rubber before you roll.":'Se toma del camión guardado del chofer, para que cargue la llanta correcta antes de salir.',
+      'The whole rig':'Todo el equipo',
+      'Engine, transmission, axle configuration, wheel type, trailer length and suspension.':'Motor, transmisión, configuración de ejes, tipo de rin, largo y suspensión del remolque.',
+      'Hazmat status':'Estado hazmat',
+      'Placard class and UN number up front — you decide before you dispatch, not after you arrive.':'Clase de placa y número UN desde el principio — usted decide antes de despachar, no después de llegar.',
+      'How far away it is':'A qué distancia está',
+      'A distance band from your yard, so you can quote an honest ETA instead of guessing.':'Un rango de distancia desde su base, para cotizar un tiempo de llegada realista sin adivinar.',
+      "The driver's rating":'La calificación del chofer',
+      "Scored by other service companies, so you know who you're dealing with before you answer.":'Calificado por otras compañías de servicio, para que sepa con quién trata antes de responder.',
+      'Only four companies ever see that driver':'Solo cuatro compañías ven a ese chofer',
+      'Three standard slots, one premium slot, then the lead closes for good. Your worst case is':'Tres espacios estándar, uno premium y luego el aviso se cierra definitivamente. En el peor caso tiene',
+      'three competitors — not thirty.':'tres competidores — no treinta.',
+      'Standard':'Estándar', 'Premium':'Premium', 'First to buy':'Primero en comprar',
+      'Second in':'Segundo en entrar', 'Last standard slot':'Último espacio estándar', 'Force in at 2×':'Entrar por fuerza a 2×',
+      'No subscription, no contract, no monthly minimum. You pay per lead, only when you choose to open one.':'Sin suscripción, contrato ni mínimo mensual. Paga por aviso, solo cuando decide abrirlo.',
+      "Prices vary by job type — a heavy recovery and a lockout aren't worth the same, and we don't pretend they are.":'Los precios varían por tipo de trabajo — un rescate pesado y una apertura de cabina no valen lo mismo, y no fingimos que sí.',
+      'Your first ten leads are free.':'Sus primeros diez avisos son gratis.',
+      "We're just getting started, and we'd rather earn your business than sell you on it. Get approved and":'Apenas empezamos y preferimos ganarnos su confianza en vez de vendérsela. Obtenga la aprobación y',
+      "your first ten unlocks are on us — real leads, real drivers, no card required. All we ask in return is":'sus primeros diez desbloqueos corren por nuestra cuenta — avisos reales, choferes reales, sin tarjeta. Solo le pedimos',
+      "that you tell us what's wrong with it. The companies who help us get this right early are the ones it":'que nos diga qué debemos mejorar. Las compañías que nos ayuden a hacerlo bien desde el principio serán aquellas',
+      'ends up built around.':'alrededor de las cuales se construya.',
+      'Getting set up takes about ten minutes':'La configuración toma unos diez minutos',
+      'Build your profile':'Cree su perfil',
+      'Your yards and how far each one covers, the services you actually perform, your equipment, and your':'Sus bases y el alcance de cada una, los servicios que realmente presta, su equipo y sus',
+      "licence and insurance if you carry them. Sign in with your mobile number — there's no password to remember.":'licencias y seguro, si los tiene. Inicie sesión con su número celular — no hay contraseña que recordar.',
+      'We approve you by hand':'Lo aprobamos personalmente',
+      "Every company is reviewed by a person before it sees a single lead. That's what keeps the junk out,":'Una persona revisa cada compañía antes de que vea un solo aviso. Así evitamos registros de mala calidad',
+      "and it's why drivers trust what comes back to them.":'y por eso los choferes confían en las respuestas que reciben.',
+      'Start getting texts':'Empiece a recibir mensajes',
+      "You're alerted only for jobs inside your coverage radius, in your line of work, on the size of truck":'Solo recibe alertas de trabajos dentro de su radio de cobertura, en su especialidad y para el tamaño de camión',
+      'you actually service. Nothing else reaches you.':'que realmente atiende. No le llega nada más.',
+      'Start your profile':'Comenzar su perfil',
+      'Straight talk about where we are':'Hablemos claro de dónde estamos',
+      "RIGRX is live and working, but we're early. We're building service coverage corridor by corridor,":'RIGRX está activo y funcionando, pero aún estamos empezando. Construimos cobertura corredor por corredor,',
+      "starting in California's Central Valley along I-5 and Highway 99. Lead volume in your area depends on how":'comenzando en el Valle Central de California por la I-5 y la carretera 99. El volumen de avisos en su zona depende de cuántos',
+      "many drivers we've signed up nearby, and in the first months that number is small and growing. We're not":'choferes se hayan registrado cerca; durante los primeros meses ese número es pequeño y va creciendo. No',
+      'going to pretend otherwise.':'vamos a fingir lo contrario.',
+      'What we can promise is that every lead you get is a real driver with a real broken truck, that no more':'Lo que sí prometemos es que cada aviso proviene de un chofer real con un camión realmente averiado, que no más',
+      "than four companies will ever see it, and that you'll never pay for a lead you didn't choose to open.":'de cuatro compañías lo verán y que nunca pagará por un aviso que no eligió abrir.',
+      "If we're not in your area yet, put your name down anyway":'Si todavía no estamos en su zona, anótese de todos modos',
+      '— where':'— el lugar donde',
+      'companies sign up is how we decide which corridor to open next.':'se registran las compañías nos ayuda a decidir qué corredor abrir después.',
+      'Not in your area yet?':'¿Aún no estamos en su zona?',
+      "Tell us where you run and we'll come to you.":'Díganos dónde opera y llegaremos a usted.',
+      "We'll get in touch before we open your corridor.":'Nos comunicaremos antes de abrir su corredor.',
+      'Company name':'Nombre de la compañía', 'Your name':'Su nombre', 'Mobile number':'Número de celular',
+      'Email':'Correo', "City you're based in":'Ciudad donde opera', 'State':'Estado',
+      "What's your main line of work?":'¿Cuál es su trabajo principal?', 'Which highways or areas do you cover?':'¿Qué carreteras o zonas cubre?',
+      'Select…':'Seleccione…', 'Heavy towing & recovery':'Grúa pesada y rescate',
+      'Commercial tire service':'Servicio de llantas comerciales', 'Mobile diesel mechanic':'Mecánico diésel móvil',
+      'Trailer & reefer repair':'Reparación de remolques y reefer', 'Tanker & pump service':'Servicio de pipas y bombas',
+      'Fuel & fluid delivery':'Entrega de combustible y fluidos', 'Mobile welding & hydraulics':'Soldadura móvil e hidráulica',
+      'Lockout & glass':'Cerrajería y cristales', 'Something else':'Otra actividad',
+      'e.g. I-40 between Barstow and Kingman, plus 60 miles around Needles':'p. ej., I-40 entre Barstow y Kingman, más 60 millas alrededor de Needles',
+      'Put me on the list':'Inclúyanme en la lista', 'Sending…':'Enviando…',
+      "We'll only contact you about RIGRX coverage in your area. Nothing else, ever.":'Solo nos comunicaremos sobre la cobertura de RIGRX en su zona. Nunca para otra cosa.',
+      "You're on the list.":'Está en la lista.', 'Sign up as a service company':'Regístrese como compañía de servicio',
+      "We'll reach out before we open your area — and if drivers start breaking down near you sooner than that,":'Nos comunicaremos antes de abrir su zona — y si los choferes empiezan a averiarse cerca antes de entonces,',
+      "you'll be the first call we make.":'usted será nuestra primera llamada.',
+      'Four companies. One driver. You already know what it\'s worth.':'Cuatro compañías. Un chofer. Ya sabe lo que vale.',
+      'Get your profile in tonight and your first ten leads are on us.':'Cree su perfil esta noche y sus primeros diez avisos corren por nuestra cuenta.',
+      '— emergency roadside marketplace for trucks · Bakersfield, California':'— mercado de auxilio vial de emergencia para camiones · Bakersfield, California',
+      'Enter your company name and home city.':'Ingrese el nombre de su compañía y la ciudad donde opera.',
+      'Enter your company name.':'Ingrese el nombre de su compañía.',
+      'Enter your home city.':'Ingrese la ciudad donde opera.',
+      'Leave a phone number or an email so we can reach you.':'Deje un teléfono o correo para que podamos comunicarnos.',
+      'Something went wrong':'Algo salió mal',
+      "Couldn't send that — check your connection and try again.":'No se pudo enviar — revise su conexión e inténtelo de nuevo.'
+    }
+  };
+  function tr(key, lang) {
+    return lang === 'es' && strings.es[key] ? strings.es[key] : key;
+  }
+  function translatePublic(lang) {
+    document.documentElement.lang = lang;
+    try { localStorage.setItem('rigrx_public_lang', lang); } catch (_) {}
+    langToggle.textContent = lang === 'es' ? 'EN' : 'ES';
+    langToggle.setAttribute('aria-label', lang === 'es' ? 'Ver en inglés' : 'Ver en español');
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach(n => {
+      if (n.parentElement?.closest('script,style')) return;
+      if (!originalText.has(n)) originalText.set(n, n.nodeValue);
+      const source = originalText.get(n);
+      if (lang !== 'es') { n.nodeValue = source; return; }
+      const key = source.trim().replace(/\s+/g, ' ');
+      if (!key) return;
+      let translated = strings.es[key];
+      if (!translated) {
+        translated = key;
+        Object.keys(strings.es)
+          .filter(k => k.length >= 4 && !k.includes('{') && translated.includes(k))
+          .sort((a,b) => b.length - a.length)
+          .forEach(k => { translated = translated.split(k).join(strings.es[k]); });
+      }
+      const leading = (source.match(/^\s*/) || [''])[0];
+      const trailing = (source.match(/\s*$/) || [''])[0];
+      n.nodeValue = leading + translated + trailing;
+    });
+    document.querySelectorAll('[placeholder],[aria-label],[title],[content]').forEach(el => {
+      if (!originalAttributes.has(el)) {
+        const attrs = {};
+        ['placeholder','aria-label','title','content'].forEach(a => { if (el.hasAttribute(a)) attrs[a] = el.getAttribute(a); });
+        originalAttributes.set(el, attrs);
+      }
+      Object.entries(originalAttributes.get(el)).forEach(([a,v]) => el.setAttribute(a, tr(v, lang)));
+    });
+    document.querySelectorAll('option').forEach(o => {
+      if (!o.dataset.en) {
+        o.dataset.en = o.textContent.trim();
+        o.dataset.value = o.value;
+      }
+      o.textContent = tr(o.dataset.en, lang);
+      o.value = o.dataset.value;
+    });
+    if (err.dataset.key) err.textContent = tr(err.dataset.key, lang);
+    if (btn.disabled) btn.textContent = tr('Sending…', lang);
+    document.title = tr('RIGRX for service companies — roadside leads with the whole truck attached', lang);
+  }
+  langToggle.addEventListener('click', () => translatePublic(document.documentElement.lang === 'es' ? 'en' : 'es'));
+  if (new URLSearchParams(location.search).get('lang') === 'es' || localStorage.getItem('rigrx_public_lang') === 'es') translatePublic('es');
+  const saved = sessionStorage.getItem('rigrx_waitlist_draft');
+  if (saved) { try { Object.entries(JSON.parse(saved)).forEach(([k,v]) => { if (form.elements[k]) form.elements[k].value = v; }); } catch (_) {} }
+  function clearInlineError(el) {
+    if (!el) return;
+    el.removeAttribute('aria-invalid');
+    const message = document.getElementById(`${el.id}-error`);
+    if (message) message.remove();
+  }
+  function showInlineError(id, key) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    clearInlineError(el);
+    const message = document.createElement('span');
+    message.id = `${id}-error`;
+    message.className = 'field-error';
+    message.setAttribute('role', 'alert');
+    message.textContent = tr(key, document.documentElement.lang);
+    el.setAttribute('aria-invalid', 'true');
+    el.setAttribute('aria-describedby', message.id);
+    el.insertAdjacentElement('afterend', message);
+  }
+  form.addEventListener('input', e => {
+    clearInlineError(e.target);
+    sessionStorage.setItem('rigrx_waitlist_draft', JSON.stringify(Object.fromEntries(new FormData(form).entries())));
+  });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     err.style.display = 'none';
+    delete err.dataset.key;
     const data = Object.fromEntries(new FormData(form).entries());
+    let firstInvalid = null;
+    if (!data.company.trim()) { showInlineError('wl-company', 'Enter your company name.'); firstInvalid ||= document.getElementById('wl-company'); }
+    if (!data.city.trim()) { showInlineError('wl-city', 'Enter your home city.'); firstInvalid ||= document.getElementById('wl-city'); }
     if (!data.phone.trim() && !data.email.trim()) {
-      err.textContent = 'Leave a phone number or an email so we can reach you.';
-      err.style.display = 'block';
-      return;
+      showInlineError('wl-phone', 'Leave a phone number or an email so we can reach you.');
+      showInlineError('wl-email', 'Leave a phone number or an email so we can reach you.');
+      firstInvalid ||= document.getElementById('wl-phone');
     }
-    btn.disabled = true; btn.textContent = 'Sending…';
+    if (firstInvalid) { firstInvalid.focus(); return; }
+    btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = tr('Sending…', document.documentElement.lang);
     try {
       const r = await fetch('/api/waitlist', {
         method: 'POST',
@@ -339,13 +523,15 @@
         body: JSON.stringify(data)
       });
       const out = await r.json();
-      if (!r.ok) throw new Error(out.error || 'Something went wrong');
+       if (!r.ok) throw new Error(tr(out.error || 'Something went wrong', document.documentElement.lang));
       form.style.display = 'none';
+      sessionStorage.removeItem('rigrx_waitlist_draft');
       document.getElementById('wlOk').style.display = 'block';
     } catch (ex) {
-      err.textContent = ex.message || "Couldn't send that — check your connection and try again.";
+       err.dataset.key = ex.message || "Couldn't send that — check your connection and try again.";
+       err.textContent = tr(err.dataset.key, document.documentElement.lang);
       err.style.display = 'block';
-      btn.disabled = false; btn.textContent = 'Put me on the list';
+      btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = tr('Put me on the list', document.documentElement.lang);
     }
   });
 </script>

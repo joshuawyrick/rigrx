@@ -1,5 +1,7 @@
 // ============ RIGRX server ============
 require('dotenv').config();
+const { validateRuntimeConfig } = require('./config');
+validateRuntimeConfig();
 const http = require('http');
 const path = require('path');
 const express = require('express');
@@ -7,7 +9,8 @@ const cookieParser = require('cookie-parser');
 const { WebSocketServer } = require('ws');
 const { migrate, one } = require('./db');
 const { attachUser } = require('./auth');
-const { wsRegister } = require('./notify');
+const { wsRegister, processNotificationOutbox } = require('./notify');
+const { reconcilePayments } = require('./marketplace');
 const routes = require('./routes');
 
 const app = express();
@@ -16,7 +19,11 @@ app.use(cookieParser());
 app.use(attachUser);
 
 app.use('/api', routes);
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// Legacy upload URLs are redirected into the authenticated API. Files are never
+// served by a public static directory.
+app.get('/uploads/:filename', (req, res) => {
+  res.redirect(307, `/api/uploads/${encodeURIComponent(req.params.filename)}`);
+});
 // index:false so the cache-busting handler below always renders index.html itself
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
 
@@ -71,10 +78,14 @@ wss.on('connection', async (socket, req) => {
     const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')));
     const token = cookies.rigrx_session;
     if (!token) return socket.close();
-    const user = await one(
-      `SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at > NOW()`, [token]);
+    const user = await one(`
+      SELECT u.* FROM sessions s
+      JOIN users u ON u.id=s.user_id
+      LEFT JOIN users company ON company.id=u.company_id
+      WHERE s.token=$1 AND s.expires_at > NOW() AND u.archived_at IS NULL
+        AND (u.role <> 'provider' OR company.archived_at IS NULL)`, [token]);
     if (!user) return socket.close();
-    wsRegister(user.id, socket);
+    wsRegister(user.id, socket, token);
     socket.send(JSON.stringify({ event: 'hello', data: { user_id: user.id } }));
   } catch (e) { socket.close(); }
 });
@@ -84,6 +95,14 @@ wss.on('connection', async (socket, req) => {
 setInterval(() => {
   routes.sweepUnacceptedJobs?.().catch(e => console.error('job sweep failed:', e.message));
   routes.sweepMarketplace?.().catch(e => console.error('marketplace sweep failed:', e.message));
+  reconcilePayments().then(report => {
+    if (report.purchases.length || report.refunds.length || report.errors.length)
+      console.log('payment reconciliation:', report);
+  }).catch(e => console.error('payment reconciliation failed:', e.message));
+  processNotificationOutbox({ limit: 50 }).then(results => {
+    const failures = results.filter(result => result.status !== 'sent');
+    if (failures.length) console.log('notification retries still pending:', failures.length);
+  }).catch(e => console.error('notification outbox failed:', e.message));
 }, 60 * 1000).unref();
 
 const PORT = process.env.PORT || 3000;

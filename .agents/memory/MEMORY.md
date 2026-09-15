@@ -1,0 +1,3 @@
+- [Payment state concurrency](payment-state-concurrency.md) — fence delayed payment writes to their attempt and reconcile refunds to a terminal provider status.
+- [Dispatch concurrency](dispatch-concurrency.md) — assignment revocation, dispatcher commands, company membership, alarms, and notifications all require durable fencing.
+- [Localized form state](localized-form-state.md) — translated labels must never become API values; saved drafts stay scoped to an account and entity.

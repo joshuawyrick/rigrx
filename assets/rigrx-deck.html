@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RIGRX — Overview Deck</title>
+<style>
+  :root{
+    --bg:#f5f5f7; --panel:#ffffff; --soft:#f2f2f4; --border:#e6e6ea;
+    --ink:#1d1d1f; --muted:#6e6e73; --faint:#a1a1a6;
+    --red:#e0162b; --red-dark:#c11224; --red-tint:#fdeef0;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .slide{min-height:100vh; display:flex; flex-direction:column; justify-content:center; align-items:center;
+    padding:60px 24px; border-bottom:1px solid var(--border);}
+  .inner{width:100%; max-width:880px;}
+  .logo{font-weight:800; letter-spacing:4px; font-size:52px;}
+  .logo span{color:var(--red);}
+  .kicker{color:var(--red); font-weight:700; text-transform:uppercase; letter-spacing:1.5px; font-size:13px; margin-bottom:12px;}
+  h1{font-size:44px; font-weight:800; letter-spacing:-1px; line-height:1.15; margin-bottom:14px;}
+  h2{font-size:34px; font-weight:800; letter-spacing:-.6px; margin-bottom:22px;}
+  p.lead{font-size:19px; color:var(--muted); line-height:1.55; max-width:640px;}
+  .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin-top:26px;}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:22px;
+    box-shadow:0 1px 2px rgba(0,0,0,.03);}
+  .card b{display:block; font-size:16px; margin-bottom:8px;}
+  .card p{font-size:14px; color:var(--muted); line-height:1.55;}
+  .num{display:inline-flex; width:30px; height:30px; border-radius:50%; background:var(--red); color:#fff;
+    font-weight:800; align-items:center; justify-content:center; font-size:14px; margin-bottom:12px;}
+  .pill{display:inline-block; background:var(--red-tint); color:var(--red); font-weight:700; font-size:12.5px;
+    padding:6px 12px; border-radius:999px; margin:4px 6px 0 0;}
+  .dark{background:var(--ink); color:#fff; border-bottom:none;}
+  .dark p.lead{color:#a1a1a6;}
+  footer{ text-align:center; padding:20px; color:var(--faint); font-size:12px;}
+</style>
+</head>
+<body>
+
+<section class="slide">
+  <div class="inner" style="text-align:center">
+    <div class="logo">RIG<span>RX</span></div>
+    <h1 style="margin-top:22px">Emergency roadside help for trucks</h1>
+    <p class="lead" style="margin:0 auto">A marketplace that connects broken-down truck drivers with vetted heavy-duty service companies — in minutes, not hours.</p>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">The problem</div>
+    <h2>A breakdown on the highway is a race against the clock</h2>
+    <p class="lead">Truckers stranded with a blown tire, dead reefer, or engine failure have no fast way to find qualified heavy-duty help nearby. Every hour off the road costs money — and calling around from the shoulder is slow, risky, and hit-or-miss.</p>
+    <div class="cards">
+      <div class="card"><b>Hard to find help</b><p>Heavy-duty service is specialized — a regular tow truck can't handle an 80,000&nbsp;lb rig.</p></div>
+      <div class="card"><b>No trust signals</b><p>Drivers can't tell who's licensed, insured, or reliable when they're desperate.</p></div>
+      <div class="card"><b>Wasted time</b><p>Phone-tag with dispatchers while cargo spoils and delivery windows slip.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">The solution</div>
+    <h2>One request alerts every qualified company nearby</h2>
+    <p class="lead">RIGRX matches each breakdown to approved service providers by service type, location, and truck class — then providers compete to respond. Live updates keep everyone in sync in real time.</p>
+    <div style="margin-top:18px">
+      <span class="pill">Towing &amp; recovery</span><span class="pill">Tires</span><span class="pill">Mobile mechanics</span><span class="pill">Reefer repair</span><span class="pill">Fuel delivery</span><span class="pill">Custom services</span>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">For drivers</div>
+    <h2>Post a request, get matched, get moving</h2>
+    <div class="cards">
+      <div class="card"><span class="num">1</span><b>Describe the breakdown</b><p>Pick the service, share GPS location, and note the truck's duty class — heavy, medium, or light.</p></div>
+      <div class="card"><span class="num">2</span><b>Vetted companies respond</b><p>Every company is approved by RIGRX. Drivers can require "licensed only" for verified operators.</p></div>
+      <div class="card"><span class="num">3</span><b>Chat, choose, and rate</b><p>Message responders, pick a company, then leave a star rating and review after the job.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">For service providers</div>
+    <h2>A steady stream of jobs, pay only for real leads</h2>
+    <div class="cards">
+      <div class="card"><span class="num">1</span><b>Get alerted to nearby work</b><p>Requests matching your services, coverage area, and truck classes appear in your lead feed instantly.</p></div>
+      <div class="card"><span class="num">2</span><b>Buy the lead, win the job</b><p>One-tap lead purchase unlocks the driver's contact details. Premium slots boost visibility.</p></div>
+      <div class="card"><span class="num">3</span><b>Build a reputation</b><p>Ratings, reviews, and a verified-license badge help you win more work over time.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">For the marketplace team</div>
+    <h2>An admin console that keeps quality high</h2>
+    <div class="cards">
+      <div class="card"><b>Provider vetting</b><p>Approve new companies, verify licenses and insurance before they can buy leads.</p></div>
+      <div class="card"><b>Sales &amp; refunds</b><p>Track every lead sale, revenue over 24h and all time, and issue refunds in one click.</p></div>
+      <div class="card"><b>Marketplace health</b><p>Fill rate, request volume, drivers and providers — the whole marketplace at a glance.</p></div>
+      <div class="card"><b>Catalog control</b><p>Approve custom services proposed by providers so the catalog grows with real demand.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="inner">
+    <div class="kicker">Under the hood</div>
+    <h2>Built for speed and trust</h2>
+    <div class="cards">
+      <div class="card"><b>Live everything</b><p>WebSocket updates push new leads, messages, and status changes instantly — no refreshing.</p></div>
+      <div class="card"><b>Smart matching</b><p>GPS-based matching by service, coverage area, and heavy / medium / light duty class.</p></div>
+      <div class="card"><b>Simple &amp; fast</b><p>Phone-number sign-in, a clean red-and-white design, and one-tap actions throughout.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="slide dark">
+  <div class="inner" style="text-align:center">
+    <div class="logo">RIG<span>RX</span></div>
+    <h2 style="margin-top:20px">Help is minutes away.</h2>
+    <p class="lead" style="margin:0 auto">RIGRX — the fastest way to get a truck back on the road.</p>
+  </div>
+</section>
+
+<footer>RIGRX Overview Deck</footer>
+</body>
+</html>

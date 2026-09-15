@@ -1,6 +1,6 @@
 // ============ Lead matching engine ============
-const { q, one } = require('./db');
-const { sms, wsPush } = require('./notify');
+const { q, one, withTransaction } = require('./db');
+const { enqueueSms, processNotificationIds, wsPush } = require('./notify');
 
 // Legacy labels from before the catalog was admin-managed. Provider selections
 // saved under an old label still count, so nobody loses their setup.
@@ -48,8 +48,12 @@ function distanceBand(mi) {
 
 // Find approved providers whose ANY location radius covers the point and who offer the category.
 // extraMiles widens the search when nobody matched (radius auto-expansion).
-async function matchProviders(request, extraMiles = 0, { anyService = false } = {}) {
-  const cat = await one('SELECT label FROM service_categories WHERE key=$1', [request.service_key]);
+async function matchProviders(request, extraMiles = 0, client = null, { anyService = false } = {}) {
+  const query = async (text, params) => client
+    ? (await client.query(text, params)).rows
+    : await q(text, params);
+  const cat = (await query(
+    'SELECT label FROM service_categories WHERE key=$1', [request.service_key]))[0] || null;
   const categoryLabel = cat?.label || null;
   // If the driver asked for licensed companies only, unverified providers are excluded.
   // A trade filter is the driver saying "only companies whose main work is this".
@@ -57,7 +61,7 @@ async function matchProviders(request, extraMiles = 0, { anyService = false } = 
   // never be texted about a box truck, and vice versa.
   const trades = Array.isArray(request.trade_filter) ? request.trade_filter : [];
   const duty = ['heavy','medium','light'].includes(request.duty_class) ? request.duty_class : 'heavy';
-  const rows = await q(`
+  const rows = await query(`
     SELECT p.user_id, p.name, p.services, p.license_verified, p.primary_trade, u.phone,
            l.id AS location_id, l.lat, l.lng, l.radius_mi
     FROM providers p
@@ -71,8 +75,8 @@ async function matchProviders(request, extraMiles = 0, { anyService = false } = 
     [!!request.licensed_only, trades.length, trades, duty]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
-    // anyService is the driver's last resort: nobody nearby offers this service,
-    // so alert every approved company in range — they may still help or know who can.
+    // anyService is the driver's last resort: nobody in range offers this service,
+    // so alert every approved company nearby — they may still help or know who can.
     if (!anyService && !offersCategory(r.services, request.service_key, categoryLabel)) continue;
     const d = haversineMiles(request.lat, request.lng, r.lat, r.lng);
     if (d <= r.radius_mi + extraMiles) {
@@ -90,28 +94,81 @@ async function matchProviders(request, extraMiles = 0, { anyService = false } = 
 // techs, who only hear about a job once it has been handed to them. A dispatcher tied
 // to a specific yard is only alerted for leads that matched that yard, so a Bakersfield
 // dispatcher is not woken at 3 AM for a Fresno breakdown.
-async function alertRecipients(companyId, locationId) {
-  const rows = await q(`
+async function alertRecipients(companyId, locationId, client = null) {
+  const text = `
     SELECT id, phone, name FROM users
     WHERE company_id = $1 AND archived_at IS NULL AND member_role IN ('owner','dispatcher')
-      AND (member_location_id IS NULL OR member_location_id = $2)`, [companyId, locationId || null]);
-  return rows;
+      AND (member_location_id IS NULL OR member_location_id = $2)`;
+  return client
+    ? (await client.query(text, [companyId, locationId || null])).rows
+    : await q(text, [companyId, locationId || null]);
 }
 
-async function notifyProviders(request, matches, price) {
+async function queueProviderNotifications(client, request, matches, price, options = {}) {
   const priceStr = '$' + (price.standard_cents / 100).toFixed(0);
+  const notificationIds = [];
+  const alerts = [];
   for (const m of matches) {
+    await client.query(`
+      INSERT INTO lead_eligibility
+        (request_id,provider_id,location_id,distance_mi,match_identity,updated_at)
+      VALUES ($1,$2,$3,$4,$5,NOW())
+      ON CONFLICT (request_id,provider_id) DO UPDATE
+      SET location_id=EXCLUDED.location_id, distance_mi=EXCLUDED.distance_mi,
+        match_identity=EXCLUDED.match_identity, updated_at=NOW()`,
+      [request.id, m.user_id, m.location_id || null, m.distance,
+       options.eventSuffix || 'initial']);
     const body = `RIGRX: New ${request.service_label.toUpperCase()} request ${request.area_label} — ` +
       `${distanceBand(m.distance)} from you — ${priceStr} to unlock. ${process.env.BASE_URL || ''}/#lead-${request.id}`;
-    let people = await alertRecipients(m.user_id, m.location_id);
+    let people = await alertRecipients(m.user_id, m.location_id, client);
     // A company set up before people existed still has its own account to fall back on.
-    if (!people.length) people = [{ id: m.user_id, phone: m.phone }];
+    if (!people.length) {
+      const fallback = (await client.query(`
+        SELECT id, phone FROM users WHERE id=$1 AND archived_at IS NULL`, [m.user_id])).rows[0];
+      if (fallback) people = [fallback];
+    }
     for (const person of people) {
-      await sms(person.id, person.phone, body);
-      wsPush(person.id, 'new_lead', {
-        request_id: request.id, service: request.service_label, band: distanceBand(m.distance) });
+      const notification = await enqueueSms(person.id, person.phone, body, {
+        client,
+        requestId: request.id,
+        eventType: 'new_lead',
+        dedupeKey: `request:${request.id}:lead:${m.user_id}:recipient:${person.id}:${options.eventSuffix || 'initial'}`,
+        payload: { provider_id: m.user_id, location_id: m.location_id }
+      });
+      if (notification) notificationIds.push(notification.id);
+      alerts.push({
+        userId: person.id,
+        payload: {
+          request_id: request.id,
+          service: request.service_label,
+          band: distanceBand(m.distance)
+        }
+      });
     }
   }
+  return { notificationIds, alerts };
 }
 
-module.exports = { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand, offersCategory };
+async function deliverProviderNotifications(prepared) {
+  await processNotificationIds(prepared?.notificationIds || []);
+  for (const alert of prepared?.alerts || [])
+    wsPush(alert.userId, 'new_lead', alert.payload);
+}
+
+async function notifyProviders(request, matches, price, options = {}) {
+  const prepared = await withTransaction(client =>
+    queueProviderNotifications(client, request, matches, price, options));
+  await deliverProviderNotifications(prepared);
+  return prepared;
+}
+
+module.exports = {
+  matchProviders,
+  notifyProviders,
+  queueProviderNotifications,
+  deliverProviderNotifications,
+  alertRecipients,
+  haversineMiles,
+  distanceBand,
+  offersCategory
+};
