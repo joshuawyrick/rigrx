@@ -1,7 +1,7 @@
 // ============ Phone-code (OTP) authentication + sessions ============
 const crypto = require('crypto');
 const { q, one } = require('./db');
-const { sms } = require('./notify');
+const { sms, smsSimulated } = require('./notify');
 
 const DEV_MODE = !process.env.TWILIO_ACCOUNT_SID; // without Twilio, the code is returned in the API response
 
@@ -17,15 +17,22 @@ async function requestCode(phone) {
   // Rate limits, because with Twilio live every code is a text that costs money:
   // at most 5 codes per phone per hour, and no new code within 30 seconds of the
   // last (stops double-taps and scripts without ever locking out a real person).
+  // In simulation mode (no Twilio keys) codes are free and shown on screen, so the
+  // anti-fraud ceiling would only brick testing. Real texts keep the tight limits.
+  const simulated = smsSimulated();
+  const maxPerHour = simulated ? 100 : 5;
+  const minGapMs = simulated ? 3 * 1000 : 30 * 1000;
   const recent = await one(
     `SELECT COUNT(*)::int AS n, MAX(created_at) AS last FROM otp_codes
      WHERE phone=$1 AND created_at > NOW() - INTERVAL '1 hour'`, [phone]);
-  if (recent.n >= 5) {
+  if (recent.n >= maxPerHour) {
     const err = new Error('Too many codes requested for this number. Try again in an hour, or call RIGRX if you are stuck.');
     err.status = 429; throw err;
   }
-  if (recent.last && Date.now() - new Date(recent.last).getTime() < 30 * 1000) {
-    const err = new Error('We just sent a code — give it 30 seconds to arrive before requesting another.');
+  if (recent.last && Date.now() - new Date(recent.last).getTime() < minGapMs) {
+    const err = new Error(simulated
+      ? 'One moment — give it a few seconds between codes.'
+      : 'We just sent a code — give it 30 seconds to arrive before requesting another.');
     err.status = 429; throw err;
   }
   const code = String(crypto.randomInt(100000, 999999));

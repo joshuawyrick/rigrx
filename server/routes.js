@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const { q, one } = require('./db');
 const auth = require('./auth');
 const { chargeLead, refund, SIMULATED, cardSetup, saveCard } = require('./payments');
-const { sms, wsPush } = require('./notify');
+const { sms, wsPush, isOnline, smsSimulated } = require('./notify');
 const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand } = require('./match');
 const { areaLabel, searchCities } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
@@ -527,16 +527,23 @@ router.post('/requests/:id/complete', auth.requireAuth, async (req, res) => {
 
 // Safety valve: a driver who chose "licensed only" and got no responders
 // can open the same request to every approved company without re-typing it.
+// The driver's recovery lever, in three escalating steps: clear their narrowing
+// filters, then widen the search radius, then — last resort — alert every approved
+// company in range even if this service isn't on their menu. A stranded driver
+// would rather hear from a wrecker who "doesn't do tires" than from nobody.
 router.post('/requests/:id/open-to-all', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET licensed_only=FALSE, trade_filter='[]'
-    WHERE id=$1 AND driver_id=$2 AND status='open'
-      AND (licensed_only=TRUE OR jsonb_array_length(trade_filter) > 0) RETURNING *`,
+  let r = await one(`SELECT * FROM requests WHERE id=$1 AND driver_id=$2 AND status='open'`,
     [req.params.id, req.user.id]);
-  if (!r) return res.status(400).json({ error: 'Nothing to widen' });
+  if (!r) return res.status(400).json({ error: 'Request not open' });
+  if (r.licensed_only || (Array.isArray(r.trade_filter) && r.trade_filter.length)) {
+    r = await one(`UPDATE requests SET licensed_only=FALSE, trade_filter='[]' WHERE id=$1 RETURNING *`, [r.id]);
+  }
   const price = await one('SELECT * FROM pricing WHERE service_key=$1', [r.service_key]);
   const already = (await q('SELECT provider_id FROM purchases WHERE request_id=$1', [r.id])).map(x => x.provider_id);
-  let matches = (await matchProviders(r)).filter(m => !already.includes(m.user_id));
-  if (!matches.length) matches = (await matchProviders(r, 50)).filter(m => !already.includes(m.user_id));
+  const fresh = m => !already.includes(m.user_id);
+  let matches = (await matchProviders(r)).filter(fresh);
+  if (!matches.length) matches = (await matchProviders(r, 50)).filter(fresh);
+  if (!matches.length) matches = (await matchProviders(r, 50, { anyService: true })).filter(fresh);
   await notifyProviders(r, matches, price);
   await q('UPDATE requests SET notified_count = notified_count + $1 WHERE id=$2', [matches.length, r.id]);
   await q('UPDATE users SET prefer_licensed_only=FALSE WHERE id=$1', [req.user.id]);
@@ -907,12 +914,20 @@ router.post('/jobs/:id/assign', requireDispatch, async (req, res) => {
     AND assignable=TRUE AND archived_at IS NULL`, [req.body.tech_id, companyIdOf(req.user)]);
   if (!tech) return res.status(400).json({ error: 'Pick someone on your team' });
 
-  await q(`UPDATE requests SET assigned_tech=$1, assigned_at=NOW(), accepted_at=NULL,
+  // Assigning a job to YOURSELF is its own acceptance — a one-person shop
+  // shouldn't have to formally agree with themselves (or get bounced by the
+  // no-answer sweep for not doing so). The accept step exists so a dispatcher
+  // knows a tech actually saw the job; when they're the same person, it's noise.
+  const selfAssign = tech.id === req.user.id;
+  await q(`UPDATE requests SET assigned_tech=$1, assigned_at=NOW(),
+           accepted_at=${selfAssign ? 'NOW()' : 'NULL'},
            assign_bounced=FALSE WHERE id=$2`, [tech.id, r.id]);
-  await sms(tech.id, tech.phone,
-    `RIGRX JOB: ${r.service_label} ${r.area_label}. Open the app to accept. ${process.env.BASE_URL || ''}`);
-  wsPush(tech.id, 'job_assigned', { request_id: r.id, service: r.service_label });
-  res.json({ ok: true });
+  if (!selfAssign) {
+    await sms(tech.id, tech.phone,
+      `RIGRX JOB: ${r.service_label} ${r.area_label}. Open the app to accept. ${process.env.BASE_URL || ''}`);
+    wsPush(tech.id, 'job_assigned', { request_id: r.id, service: r.service_label });
+  }
+  res.json({ ok: true, self_accepted: selfAssign });
 });
 
 router.post('/jobs/:id/accept', auth.requireRole('provider'), async (req, res) => {
@@ -1072,7 +1087,8 @@ router.post('/provider/members', requireOwner, async (req, res) => {
       `Inicie sesión con este número — sin contraseña. ${process.env.BASE_URL || ''}`
     : `RIGRX: ${company?.name || 'Your company'} added you as ${role === 'tech' ? 'a technician' : 'a dispatcher'}. ` +
       `Sign in with this number — no password needed. ${process.env.BASE_URL || ''}`);
-  res.json({ ok: true, member: { id: u.id, name: u.name, phone: u.phone, member_role: u.member_role } });
+  res.json({ ok: true, sms_simulated: smsSimulated(),
+             member: { id: u.id, name: u.name, phone: u.phone, member_role: u.member_role } });
 });
 
 router.put('/provider/members/:id', requireOwner, async (req, res) => {
@@ -1149,11 +1165,10 @@ async function canAccessThread(user, requestId, providerId) {
   const r = await one('SELECT * FROM requests WHERE id=$1', [requestId]);
   if (!r) return null;
   if (user.role === 'admin') return r;
+  const pu = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [requestId, providerId]);
+  if (!pu) return null;                                        // no purchase, no thread — either side
   if (r.driver_id === user.id) return r;                       // the driver
-  if (user.id === Number(providerId)) {                        // the provider — must have bought
-    const pu = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [requestId, providerId]);
-    if (pu) return r;
-  }
+  if (user.id === Number(providerId)) return r;                // the provider who bought
   return null;
 }
 
@@ -1234,11 +1249,66 @@ router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, re
     }
   }
 
-  // push to the other party
+  // push to the other party — and if their app is closed, a text message.
   const recipient = req.user.id === r.driver_id ? Number(req.params.providerId) : r.driver_id;
   wsPush(recipient, 'message', m);
+  notifyOfflineParty(r, req.user, recipient, m).catch(e => console.error('chat sms failed:', e.message));
   res.json(m);
 });
+
+/* ---- offline chat notifications ----
+   The in-app toast only reaches an open app. When the other side's screen is
+   closed, a quote always earns a text (a quote is money), and plain messages are
+   batched to at most one text per thread per 10 minutes so an active back-and-forth
+   doesn't machine-gun anyone's phone. Company-side texts go to every owner and
+   dispatcher who is offline, each in their own language. */
+const chatSmsLast = new Map(); // threadKey:userId -> last text time
+function chatSmsDue(key, isQuote) {
+  if (isQuote) { chatSmsLast.set(key, Date.now()); return true; }  // a quote counts toward the batch window too
+  const last = chatSmsLast.get(key) || 0;
+  if (Date.now() - last < 10 * 60 * 1000) return false;
+  chatSmsLast.set(key, Date.now());
+  if (chatSmsLast.size > 5000) chatSmsLast.clear(); // bounded memory, resets harmlessly
+  return true;
+}
+async function notifyOfflineParty(r, sender, recipientId, m) {
+  const isQuote = !!m.quote;
+  const threadKey = `${r.id}:${m.provider_id}`;
+  const base = process.env.BASE_URL || '';
+  const snippet = String(m.body || '').slice(0, 70);
+
+  const textFor = (person, senderName) => {
+    if (isQuote) {
+      const amt = '$' + Math.round((m.quote.amount_cents || 0) / 100);
+      const eta = m.quote.eta ? ` · ETA ${m.quote.eta} min` : '';
+      return inLang(person,
+        `RIGRX: New quote on request #${r.id} (${r.service_label}): ${amt}${eta} from ${senderName}. Compare and choose in the app. ${base}`,
+        `RIGRX: Nueva cotización en la solicitud #${r.id} (${r.service_label}): ${amt}${eta} de ${senderName}. Compare y elija en la app. ${base}`);
+    }
+    return inLang(person,
+      `RIGRX: New message from ${senderName} on request #${r.id}: "${snippet}" Reply in the app. ${base}`,
+      `RIGRX: Nuevo mensaje de ${senderName} en la solicitud #${r.id}: "${snippet}" Responda en la app. ${base}`);
+  };
+
+  if (recipientId === r.driver_id) {
+    // driver side: one person, one phone
+    if (isOnline(recipientId)) return;
+    if (!chatSmsDue(`${threadKey}:${recipientId}`, isQuote)) return;
+    const d = await one('SELECT id, phone, lang FROM users WHERE id=$1 AND archived_at IS NULL', [recipientId]);
+    const p = await one('SELECT name FROM providers WHERE user_id=$1', [m.provider_id]);
+    if (d) await sms(d.id, d.phone, textFor(d, p?.name || 'the service company'));
+  } else {
+    // company side: every owner/dispatcher whose app is closed
+    const senderName = sender.name || 'the driver';
+    const people = await alertRecipients(recipientId, null);
+    for (const person of people) {
+      if (isOnline(person.id)) continue;
+      if (!chatSmsDue(`${threadKey}:${person.id}`, isQuote)) continue;
+      const full = await one('SELECT id, phone, lang FROM users WHERE id=$1', [person.id]);
+      if (full) await sms(full.id, full.phone, textFor(full, senderName));
+    }
+  }
+}
 
 /* ---------------- reviews ---------------- */
 router.post('/reviews', auth.requireAuth, async (req, res) => {

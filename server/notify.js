@@ -36,4 +36,12 @@ function wsPush(userId, event, data) {
   for (const s of set) { try { s.send(payload); } catch (e) {} }
 }
 
-module.exports = { sms, wsRegister, wsPush };
+// Is this person's app open right now? Powers the offline-SMS decision: someone
+// looking at the screen gets the in-app toast; someone who closed Safari gets a text.
+function isOnline(userId) {
+  const set = sockets.get(userId);
+  return !!set && set.size > 0;
+}
+const smsSimulated = () => !(twilioClient && process.env.TWILIO_FROM_NUMBER);
+
+module.exports = { sms, wsRegister, wsPush, isOnline, smsSimulated };

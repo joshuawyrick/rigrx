@@ -393,6 +393,21 @@
     'Use this town': 'Usar este pueblo',
     'Start typing and pick a city from the list': 'Empiece a escribir y elija una ciudad de la lista',
 
+    // ---- v23: honesty, recovery, routing ----
+    'Nobody has been alerted yet': 'Aún no se ha avisado a nadie',
+    'No approved company in range offers this service yet.': 'Ninguna compañía aprobada en su área ofrece este servicio todavía.',
+    "RIGRX has been alerted and is working on it. You can also blast every approved company nearby — even ones that don't list this service. One of them may still help, or know who can.": 'RIGRX ya fue avisado y está trabajando en ello. También puede avisar a todas las compañías aprobadas cercanas — incluso las que no ofrecen este servicio. Alguna podría ayudar, o conocer a quien pueda.',
+    'Alert every approved company nearby': 'Avisar a todas las compañías aprobadas cercanas',
+    'Still nobody in range — RIGRX has been alerted and will help find someone': 'Aún no hay nadie en su área — RIGRX fue avisado y ayudará a encontrar a alguien',
+    'You were signed out — sign in again': 'Se cerró su sesión — inicie sesión de nuevo',
+    '+{n} more ›': '+{n} más ›',
+    'Edit profile': 'Editar perfil',
+    'License plate (optional)': 'Placa (opcional)',
+    'Service companies — how RIGRX gets you jobs ›': 'Compañías de servicio — cómo RIGRX les consigue trabajos ›',
+    'HEAVY': 'PESADO',
+    'MEDIUM DUTY': 'MEDIANO',
+    'LIGHT DUTY': 'LIGERO',
+
     // ---- language ----
     'Language': 'Idioma',
 

@@ -48,7 +48,7 @@ function distanceBand(mi) {
 
 // Find approved providers whose ANY location radius covers the point and who offer the category.
 // extraMiles widens the search when nobody matched (radius auto-expansion).
-async function matchProviders(request, extraMiles = 0) {
+async function matchProviders(request, extraMiles = 0, { anyService = false } = {}) {
   const cat = await one('SELECT label FROM service_categories WHERE key=$1', [request.service_key]);
   const categoryLabel = cat?.label || null;
   // If the driver asked for licensed companies only, unverified providers are excluded.
@@ -71,7 +71,9 @@ async function matchProviders(request, extraMiles = 0) {
     [!!request.licensed_only, trades.length, trades, duty]);
   const seen = new Map(); // provider -> closest distance
   for (const r of rows) {
-    if (!offersCategory(r.services, request.service_key, categoryLabel)) continue;
+    // anyService is the driver's last resort: nobody nearby offers this service,
+    // so alert every approved company in range — they may still help or know who can.
+    if (!anyService && !offersCategory(r.services, request.service_key, categoryLabel)) continue;
     const d = haversineMiles(request.lat, request.lng, r.lat, r.lng);
     if (d <= r.radius_mi + extraMiles) {
       if (!seen.has(r.user_id) || d < seen.get(r.user_id).distance) {

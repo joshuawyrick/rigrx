@@ -16,15 +16,47 @@ function timeAgo(ts){
   const h = Math.round(m / 60);
   return h < 24 ? T('{n} hr ago', { n: h }) : T('{n} d ago', { n: Math.round(h / 24) });
 }
-async function api(method, url, body){
-  const res = await fetch('/api' + url, {
-    method, headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined
-  });
+async function api(method, url, body, _retried){
+  let res;
+  try {
+    res = await fetch('/api' + url, {
+      method, headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (e) {
+    // Phones kill connections when Safari is backgrounded; one quiet retry
+    // turns most "Couldn't load this page" moments into a normal load.
+    if (method === 'GET' && !_retried) {
+      await new Promise(r => setTimeout(r, 600));
+      return api(method, url, body, true);
+    }
+    throw e;
+  }
   const data = await res.json().catch(()=>({}));
+  if (res.status === 401 && S.me) {
+    // The session ended (signed out in another tab, or expired). Never leave a
+    // dead dashboard on screen with a misleading toast — go to a clean sign-in.
+    S.me = null; S.provider = null;
+    toast(T('You were signed out — sign in again'));
+    nav('signin');
+    throw new Error('signed out');
+  }
   if (!res.ok) { toast(data.error || T('Request failed')); throw new Error(data.error || res.status); }
   return data;
 }
+// A tab that wakes from the background may be painted as an account that is no
+// longer the one signed in (the other tab switched or signed out). Re-check and
+// repaint rather than letting someone act on a stale screen.
+let lastWakeCheck = 0;
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !S.me) return;
+  if (Date.now() - lastWakeCheck < 5000) return;
+  lastWakeCheck = Date.now();
+  try {
+    const d = await api('GET', '/me');
+    if (d.user && d.user.id !== S.me.id) { await loadMe(); connectWS(); nav(homeFor()); }
+  } catch (e) {} // 401 already handled inside api()
+});
 function tog(el){ el.classList.toggle('sel'); }
 function togOne(el){ [...el.parentElement.children].forEach(c=>c.classList.remove('sel')); el.classList.add('sel'); }
 function selOf(groupId){ const g = $(groupId); return g ? [...g.querySelectorAll('.chip.sel')].map(chipVal) : []; }
@@ -70,13 +102,59 @@ async function loadMe(){
   S.trucks = d.trucks || []; S.trailers = d.trailers || [];
   S.simulatedPayments = !!d.simulatedPayments;
 }
-function nav(view, extra){
+/* Friendly URLs for the screens people bookmark or share. Anything else keeps
+   its internal view name as the path. The phone's Back button walks these. */
+const FRIENDLY_PATHS = {
+  'd-home': '/', 'd-garage': '/garage', 'd-threads': '/messages', 'd-request': '/request',
+  'p-feed': '/leads', 'p-jobs': '/jobs', 'p-myleads': '/myleads', 'p-threads': '/messages',
+  'p-stats': '/stats', 'p-people': '/team', 'p-settings': '/settings', 't-jobs': '/jobs',
+  'a-home': '/', 'signin': '/signin'
+};
+function pathFor(view){ return FRIENDLY_PATHS[view] || '/' + view; }
+function viewFromPath(path){
+  if (!S.me) return null;
+  const role = S.me.role, mr = S.me.member_role;
+  const alias = {
+    '/garage': 'd-garage', '/request': 'd-request', '/history': 'd-home',
+    '/messages': role === 'provider' ? (mr === 'tech' ? 't-jobs' : 'p-threads') : 'd-threads',
+    '/leads': 'p-feed', '/jobs': mr === 'tech' ? 't-jobs' : 'p-jobs', '/myleads': 'p-myleads',
+    '/stats': 'p-stats', '/team': 'p-people',
+    '/settings': role === 'provider' ? 'p-settings' : 'd-setup1'
+  }[path];
+  const view = alias || (VIEWS[path.slice(1)] ? path.slice(1) : null);
+  if (!view) return null;
+  // role guard: a driver can't deep-link into provider or admin screens
+  const p = view.split('-')[0];
+  if (p === 'a' && role !== 'admin') return null;
+  if (p === 'p' && role !== 'provider') return null;
+  if (p === 'd' && role !== 'driver' && role !== 'admin') return null;
+  if (p === 't' && mr !== 'tech') return null;
+  return view;
+}
+// The pieces of S a screen needs to rebuild itself after Back/Forward.
+const NAV_STATE_KEYS = ['activeRequestId','chatKey','chatBack','viewProviderId','rateRequestId',
+  'leadId','leadFilter','adminProviderId','adminDriverId','adminReqWindow','adminSalesWindow','adminRequestId'];
+function navState(){
+  const st = { view: S.view, extra: {} };
+  for (const k of NAV_STATE_KEYS) if (S[k] != null) st.extra[k] = S[k];
+  return st;
+}
+function nav(view, extra, fromPop){
   S.view = view;
   Object.assign(S, extra || {});
+  if (!fromPop && window.history?.pushState) {
+    try { history.pushState(navState(), '', pathFor(view)); } catch(e){}
+  }
   render();
   window.scrollTo(0, 0);
   if (view === 'd-review') setTimeout(previewMatches, 60);
 }
+window.addEventListener('popstate', e => {
+  if (!S.me) return;
+  const st = e.state;
+  if (st && st.view && VIEWS[st.view]) nav(st.view, st.extra || {}, true);
+  else nav(homeFor(), {}, true);
+});
 function homeFor(){
   if (!S.me) return 'signin';
   if (S.me.role === 'admin') return 'a-home';
@@ -139,7 +217,8 @@ function vSignin(){
     <button class="btn" onclick="requestCode()">${ic('mobile',16)} ${T('Text me a code')}</button>
   </div>
   <div class="faint" style="text-align:center; line-height:1.6">${T('Your number is your account — no passwords.')}<br>${T('New numbers create an account; existing ones sign in.')}</div>
-  ${langToggle()}`);
+  ${langToggle()}
+  <div style="text-align:center; margin-top:10px"><a href="/for-service-companies" style="font-size:13px">${T('Service companies — how RIGRX gets you jobs ›')}</a></div>`);
 }
 async function requestCode(){
   const phone = qv('si-phone').trim();
@@ -182,7 +261,9 @@ async function verifyCode(){
   await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole, lang: getLang() });
   await loadMe();
   connectWS();
-  nav(homeFor());
+  const dest = S.afterLoginPath ? viewFromPath(S.afterLoginPath) : null;
+  S.afterLoginPath = null;
+  nav(dest || homeFor());
 }
 async function signOut(){
   await api('POST', '/auth/logout').catch(()=>{});
@@ -335,7 +416,10 @@ function truckForm(t = {}){
     <div><label class="f">${T('Wheels')}</label>${sel('tk-wheels', EQ().WHEEL_TYPES || [], t.wheels, { placeholder: 'Select…', field: 'wheels' })}</div>
     <div><label class="f">${T('Color')}</label>${sel('tk-color', EQ().TRUCK_COLORS || [], t.color, { placeholder: 'Select color…', field: 'truck_color' })}</div>
   </div>
-  <label class="f">${T('VIN (optional — speeds up parts)')}</label><input type="text" id="tk-vin" value="${esc(t.vin)}">
+  <div class="grid2">
+    <div><label class="f">${T('License plate (optional)')}</label><input type="text" id="tk-plate" value="${esc(t.plate)}"></div>
+    <div><label class="f">${T('VIN (optional — speeds up parts)')}</label><input type="text" id="tk-vin" value="${esc(t.vin)}"></div>
+  </div>
   <label class="f">${T('Extras (optional)')}</label>
   <div class="chips" id="tk-extras">
     ${(EQ().TRUCK_EXTRAS || []).map(e=>`<span class="chip ${(t.extras||[]).includes(e)?'sel':''}" onclick="tog(this)">${esc(e)}</span>`).join('')}
@@ -346,7 +430,7 @@ function readTruckForm(){
     make: selVal('tk-make'), model: selVal('tk-model'),
     engine: selVal('tk-engine'), trans: selVal('tk-trans'), axles: selVal('tk-axles'),
     steer: selVal('tk-steer'), drive: selVal('tk-drive'), wheels: selVal('tk-wheels'),
-    color: selVal('tk-color'), vin: qv('tk-vin'), extras: selOf('tk-extras') };
+    color: selVal('tk-color'), vin: qv('tk-vin'), plate: qv('tk-plate'), extras: selOf('tk-extras') };
 }
 function vDSetup2(){
   if (S.editTruck?.duty) S.dutyClass = S.editTruck.duty;
@@ -455,19 +539,19 @@ async function vDHome(){
   <div class="cols2"><div>
   <div class="card">
     <div class="row"><span class="sec">${T('My Garage')}</span><span class="faint" style="cursor:pointer" onclick="nav('d-garage')">${T('Manage ›')}</span></div>
-    ${t ? `<div class="checkrow"><span class="cico on">${ic('truck')}</span><div><b class="mini k">${T('Unit')} ${esc(t.unit)} — ${esc(t.year)} ${esc(t.make)} ${esc(t.model)}</b><div class="faint">${esc(t.engine)} · ${esc(t.axles)} · ${esc(t.color)}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('truck')}</span><div class="mini"><a onclick="S.editTruck=null; nav('d-setup2')">${T('Add your truck ›')}</a></div></div>`}
-    ${r ? `<div class="checkrow"><span class="cico on">${ic('trailer')}</span><div><b class="mini k">${T('Trailer')} ${esc(r.num)} — ${esc(r.type)}</b><div class="faint">${r.hazmat ? T('Hazmat: Class')+' '+esc(r.hzClass)+' · UN '+esc(r.un) : T('No hazmat')}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('trailer')}</span><div class="mini"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('Add your trailer ›')}</a></div></div>`}
+    ${t ? `<div class="checkrow"><span class="cico on">${ic('truck')}</span><div><b class="mini k">${T('Unit')} ${esc(t.unit)} — ${esc(t.year)} ${esc(t.make)} ${esc(t.model)}</b><div class="faint">${esc(t.engine)} · ${esc(t.axles)} · ${esc(t.color)}${S.trucks.length > 1 ? ` · <a onclick="nav('d-garage')">${T('+{n} more ›', { n: S.trucks.length - 1 })}</a>` : ''}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('truck')}</span><div class="mini"><a onclick="S.editTruck=null; nav('d-setup2')">${T('Add your truck ›')}</a></div></div>`}
+    ${r ? `<div class="checkrow"><span class="cico on">${ic('trailer')}</span><div><b class="mini k">${T('Trailer')} ${esc(r.num)} — ${esc(r.type)}</b><div class="faint">${r.hazmat ? T('Hazmat: Class')+' '+esc(r.hzClass)+' · UN '+esc(r.un) : T('No hazmat')}${S.trailers.length > 1 ? ` · <a onclick="nav('d-garage')">${T('+{n} more ›', { n: S.trailers.length - 1 })}</a>` : ''}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('trailer')}</span><div class="mini"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('Add your trailer ›')}</a></div></div>`}
   </div></div><div>
   <div class="card">
     <span class="sec">${T('History')}</span>
-    ${mine.filter(x=>['completed','cancelled'].includes(x.status)).slice(0,5).map(x=>`
+    ${mine.filter(x=>['completed','cancelled','expired'].includes(x.status)).slice(0,5).map(x=>`
       <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(T(x.service_label))}</b><div class="faint">${timeAgo(x.created_at)} · ${T(x.status)}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No past requests yet')}</div>`}
   </div></div></div>`;
 }
 function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no', direction: '',
               lat: null, lng: null, photos: [],
-              licensed_only: !!S.me?.prefer_licensed_only,   // remembers last choice
+              licensed_only: false,   // every request starts wide open — narrowing is an explicit choice each time
               trade_filter: [],
               duty_class: S.trucks?.[0]?.data?.duty || 'heavy' };
   nav('d-request');
@@ -806,7 +890,7 @@ async function vDActive(){
   const filled = d.responders.length;
   return `
   <button class="back" onclick="nav('d-home')">${ic('chevL',15)} ${T('Home')}</button>
-  <h2 class="scr">${r.status==='open' ? T('Help is on the way') : T('Request #')+r.id}</h2>
+  <h2 class="scr">${r.status==='open' ? (r.notified_count > 0 || filled ? T('Help is on the way') : T('Nobody has been alerted yet')) : T('Request #')+r.id}</h2>
   <p class="scrsub">${T('Request #')}${r.id} · ${esc(T(r.service_label))} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')}</p>
   ${onTheWayCard(d.on_the_way)}
   <div class="card">
@@ -825,6 +909,13 @@ async function vDActive(){
     <div class="card alert">
       <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">${T(r.duty_class === 'medium' ? 'No medium-duty companies cover this area yet.' : 'No light-duty companies cover this area yet.')}</b>
       ${T('The shops nearby have told us they only work on heavy trucks. Your request stays open in case one widens their coverage — call around in the meantime.')}</div>
+    </div>` : ''}
+  ${r.notified_count === 0 && r.status === 'open' && !(r.licensed_only || (r.trade_filter||[]).length) && (!r.duty_class || r.duty_class === 'heavy') ? `
+    <div class="card alert">
+      <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">${T('No approved company in range offers this service yet.')}</b>
+      ${T("RIGRX has been alerted and is working on it. You can also blast every approved company nearby — even ones that don't list this service. One of them may still help, or know who can.")}</div>
+      <div style="height:10px"></div>
+      <button class="btn" onclick="openToAll(${r.id})">${T('Alert every approved company nearby')}</button>
     </div>` : ''}
   ${filled === 0 && !((r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0) && !(r.notified_count === 0 && r.duty_class && r.duty_class !== 'heavy') ? `<div class="card" style="text-align:center"><span class="muted">${ic('clock',13)} ${T("Waiting for providers to respond… you'll get a text the second one does.")}</span></div>` : ''}
   ${filled > 0 && r.status === 'open' ? `<div class="card alert">
@@ -853,7 +944,9 @@ async function vDActive(){
 }
 async function openToAll(reqId){
   const res = await api('POST', `/requests/${reqId}/open-to-all`);
-  toast(TN(res.notified, '{n} more company notified', '{n} more companies notified'));
+  toast(res.notified === 0
+    ? T('Still nobody in range — RIGRX has been alerted and will help find someone')
+    : TN(res.notified, '{n} more company notified', '{n} more companies notified'));
   render();
 }
 function askChoose(reqId, provId, name){
@@ -973,7 +1066,8 @@ async function removeTrailer(id, label){
 }
 async function vDGarage(){
   return `
-  <h2 class="scr">${T('My Garage')}</h2>
+  <div class="row"><h2 class="scr">${T('My Garage')}</h2>
+    <a class="mini" onclick="nav('d-setup1')">${ic('edit',13)} ${T('Edit profile')}</a></div>
   <p class="scrsub">${T('Saved rigs make requests take 30 seconds')}</p>
   <div class="cols2"><div>
   ${S.trucks.map(x=>`<div class="card">
@@ -1440,9 +1534,9 @@ function vPSetup5(){
   <p class="scrsub">Step 5 of 5 — drivers trust RIGRX because every company is vetted</p>
   <label class="f">Business / tow license #</label>
   <input type="text" id="vf-license" value="${esc(v.license)}" placeholder="CA-TOW-88412">
-  <label class="f">Certificate of insurance (PDF or photo)</label>
+  <label class="f">Certificate of insurance (PDF or photo) <span style="text-transform:none; letter-spacing:0; font-weight:500">— optional, needed for the LICENSED badge</span></label>
   <label class="chip dashed" style="cursor:pointer; display:inline-flex">${v.coi_file ? '✓ Uploaded — replace' : '+ Upload COI'}<input type="file" style="display:none" onchange="uploadDoc(this,'coi_file')"></label>
-  <label class="f">W-9 (PDF or photo)</label>
+  <label class="f">W-9 (PDF or photo) <span style="text-transform:none; letter-spacing:0; font-weight:500">— optional, needed for the LICENSED badge</span></label>
   <label class="chip dashed" style="cursor:pointer; display:inline-flex">${v.w9_file ? '✓ Uploaded — replace' : '+ Upload W-9'}<input type="file" style="display:none" onchange="uploadDoc(this,'w9_file')"></label>
   <div class="card alert" style="margin-top:16px">
     <div class="mini" style="line-height:1.55">${ic('card',13)} <b class="k">Card on file:</b> ${S.simulatedPayments ? 'payments are in simulation mode until Stripe keys are added — no card needed to test.' : 'you will be asked for a card before your first lead purchase.'}</div>
@@ -1498,9 +1592,9 @@ async function vPFeed(){
 }
 // A one-word size badge so a heavy-only shop can tell at a glance what rolled in
 function dutyPill(cls){
-  if (!cls || cls === 'heavy') return '<span class="pill gray" style="margin-right:6px">HEAVY</span>';
-  if (cls === 'medium') return '<span class="pill dark" style="margin-right:6px">MEDIUM DUTY</span>';
-  return '<span class="pill dark" style="margin-right:6px">LIGHT DUTY</span>';
+  if (!cls || cls === 'heavy') return `<span class="pill gray" style="margin-right:6px">${T('HEAVY')}</span>`;
+  if (cls === 'medium') return `<span class="pill dark" style="margin-right:6px">${T('MEDIUM DUTY')}</span>`;
+  return `<span class="pill dark" style="margin-right:6px">${T('LIGHT DUTY')}</span>`;
 }
 function leadCard(l){
   return `<div class="lead" onclick="nav('p-lead',{leadId:${l.id}})">
@@ -1592,7 +1686,12 @@ async function vPLead(){
   ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
     <div class="mini" style="line-height:1.5; color:#14603a"><b class="k" style="color:#14603a">${l.my_credits} free lead${l.my_credits===1?'':'s'} on your account.</b> This unlock uses one — your card is not touched.</div>
   </div>` : ''}
-  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? `UNLOCK FREE — 1 CREDIT` : `${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}`}</button>
+  ${S.provider && !S.provider.approved ? `
+  <div class="card" style="border-color:var(--red)">
+    <div class="mini" style="line-height:1.55">${ic('clock',14)} <b class="k">Pending RIGRX approval.</b> You can browse masked leads now; buying unlocks the moment you're approved — usually within a day. Questions? Reply to your signup text.</div>
+  </div>
+  <button class="btn big" disabled>${ic('lock',17)} UNLOCK LEAD — ${fmt$(l.price_cents)}</button>` : `
+  <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? `UNLOCK FREE — 1 CREDIT` : `${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}`}</button>`}
   <div class="faint" style="text-align:center; margin-top:9px">${l.my_credits > 0 ? 'No charge — you have free leads left' : S.simulatedPayments ? 'Payment simulation mode — no real charge' : ic('card',12) + ' Charged to your card on file'} · unreachable-driver refund policy applies</div>`}
   </div></div>`;
 }
@@ -1742,10 +1841,12 @@ async function vPPeople(){
 async function addMember(){
   const name = qv('mb-name').trim(), phone = qv('mb-phone').trim();
   if (!name || !phone) return toast('Name and mobile number both needed');
-  await api('POST', '/provider/members', { name, phone,
+  const r = await api('POST', '/provider/members', { name, phone,
     member_role: $('mb-role').value, member_location_id: $('mb-loc').value || null,
     lang: $('mb-lang')?.value || 'en' });
-  toast(name + ' added — we texted them a sign-in link');
+  toast(r.sms_simulated
+    ? name + ' added — test mode, so no text went out. Tell them to sign in with their number.'
+    : name + ' added — we texted them a sign-in link');
   render();
 }
 async function removeMember(id, name){
@@ -1812,8 +1913,8 @@ async function rateDriver(id, stars){
 async function assignJob(id){
   const techId = $('as-' + id)?.value;
   if (!techId) return toast('Pick someone first');
-  await api('POST', `/jobs/${id}/assign`, { tech_id: Number(techId) });
-  toast('Assigned — we texted them');
+  const r = await api('POST', `/jobs/${id}/assign`, { tech_id: Number(techId) });
+  toast(r.self_accepted ? "It's yours — hit On my way when you roll" : 'Assigned — we texted them');
   render();
 }
 
@@ -2019,7 +2120,8 @@ async function vPSettings(){
     <div class="checkrow"><span class="cico ${p.verification?.license?'on':''}">${ic('check',15)}</span><span class="mini">License ${p.verification?.license ? '— '+esc(p.verification.license) : '(add it)'}</span></div>
     <div class="checkrow"><span class="cico ${p.verification?.coi_file?'on':''}">${ic('check',15)}</span><span class="mini">Certificate of insurance ${p.verification?.coi_file ? '— uploaded' : '(upload)'}</span></div>
     <div class="checkrow"><span class="cico ${p.approved?'on':''}">${ic(p.approved?'check':'clock',15)}</span><span class="mini">${p.approved ? 'Approved — you can buy leads' : 'Pending RIGRX review'}</span></div>
-    <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${p.license_verified ? 'License verified — you receive licensed-only leads' : 'License not verified — you miss licensed-only leads'}</span></div>
+    <div class="checkrow"><span class="cico ${p.license_verified?'on':''}">${ic(p.license_verified?'check':'clock',15)}</span><span class="mini">${p.license_verified ? 'License verified — you receive licensed-only leads'
+      : (p.verification?.license ? 'License on file — awaiting RIGRX verification' : 'No license on file — you miss licensed-only leads')}</span></div>
   </div>
   <div class="card">
     <div class="row"><span class="sec">Spanish-speaking dispatch</span>
@@ -2797,7 +2899,12 @@ async function render(){
   await loadCatalog();
   try { await loadMe(); } catch(e){}
   if (S.me) connectWS();
-  nav(homeFor());
+  else if (location.pathname !== '/' && location.pathname !== '/signin')
+    S.afterLoginPath = location.pathname;   // finish the journey after they sign in
+  const deep = viewFromPath(location.pathname);
+  S.view = deep || homeFor();
+  try { history.replaceState(navState(), '', pathFor(S.view)); } catch(e){}
+  render();
 })();
 
 async function toggleSpanishDispatch(on){
