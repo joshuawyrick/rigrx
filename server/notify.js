@@ -1,15 +1,61 @@
 // ============ Durable notifications: SMS outbox + in-app WebSocket push ============
 const crypto = require('crypto');
 const { q, one, withTransaction } = require('./db');
-const { simulationEnabled, smsConfigured } = require('./config');
+const { simulationEnabled, twilioConfigured } = require('./config');
 
 let twilioClient = null;
-if (smsConfigured()) {
+if (twilioConfigured()) {
   try { twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN); }
   catch (e) {
     if (!simulationEnabled()) throw e;
     console.error('Twilio init failed; explicit development simulation remains active:', e.message);
   }
+}
+
+// ---- SMS8.io adapter (https://sms8.io) ----
+// Sends through an Android phone paired to an SMS8 account. Dormant unless
+// SMS8_API_KEY is set. Optional: SMS8_DEVICE_ID (comma-separated device ids),
+// SMS8_OPTION (0 = use listed devices, 1 = rotate all, 2 = random; default 0),
+// SMS_PROVIDER=sms8|twilio to force a provider when both are configured.
+async function sendViaSms8(to, body) {
+  const form = new URLSearchParams();
+  form.set('key', process.env.SMS8_API_KEY);
+  form.set('messages', JSON.stringify([{ number: to, message: body, type: 'sms' }]));
+  form.set('option', process.env.SMS8_OPTION || '0');
+  if (process.env.SMS8_DEVICE_ID) form.set('devices', process.env.SMS8_DEVICE_ID);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30 * 1000);
+  timer.unref?.();
+  let res, parsed;
+  try {
+    res = await fetch('https://app.sms8.io/api/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  try { parsed = JSON.parse(text); } catch { parsed = null; }
+  if (!res.ok || !parsed || parsed.success === false)
+    throw new Error(`SMS8 send failed (HTTP ${res.status}): ${String(text).slice(0, 300)}`);
+  const first = Array.isArray(parsed.data) ? parsed.data[0] : null;
+  return first?.ID ? `sms8:${first.ID}` : 'sms8:queued';
+}
+
+// Decide which provider handles this delivery, at send time so tests and
+// runtime key changes are both respected.
+function activeSmsProvider() {
+  const twilioReady = !!(twilioClient && process.env.TWILIO_FROM_NUMBER);
+  const sms8Ready = !!process.env.SMS8_API_KEY;
+  const forced = String(process.env.SMS_PROVIDER || '').toLowerCase();
+  if (forced === 'sms8' && sms8Ready) return 'sms8';
+  if (forced === 'twilio' && twilioReady) return 'twilio';
+  if (twilioReady) return 'twilio';
+  if (sms8Ready) return 'sms8';
+  return null;
 }
 
 const MAX_ATTEMPTS = 5;
@@ -206,13 +252,17 @@ async function deliverClaimed(row) {
     if (!row.phone) throw new Error('No destination phone number');
     let providerMessageId = '';
     let simulated = true;
-    if (twilioClient && process.env.TWILIO_FROM_NUMBER) {
+    const provider = activeSmsProvider();
+    if (provider === 'twilio') {
       const sent = await twilioClient.messages.create({
         to: row.phone,
         from: process.env.TWILIO_FROM_NUMBER,
         body: row.body
       });
       providerMessageId = sent?.sid || '';
+      simulated = false;
+    } else if (provider === 'sms8') {
+      providerMessageId = await sendViaSms8(row.phone, row.body);
       simulated = false;
     } else {
       if (!simulationEnabled()) throw new Error('SMS delivery is not configured');

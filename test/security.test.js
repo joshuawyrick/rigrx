@@ -162,6 +162,58 @@ test('production configuration cannot enable simulation or omit SMS/payment cred
     /TWILIO_ACCOUNT_SID.*STRIPE_SECRET_KEY/
   );
   assert.equal(validateRuntimeConfig({ ...base, RIGRX_ALLOW_SIMULATION: 'true' }).simulation, true);
+  // SMS8 alone satisfies the SMS requirement in production (payments still required).
+  const sms8Prod = validateRuntimeConfig({
+    ...base, NODE_ENV: 'production', SMS8_API_KEY: 'k',
+    STRIPE_SECRET_KEY: 'sk', STRIPE_PUBLISHABLE_KEY: 'pk'
+  });
+  assert.equal(sms8Prod.smsSimulated, false);
+});
+
+test('SMS8 provider delivers through the outbox and records the provider message id', async () => {
+  const f = await createDispatchFixture();
+  notify._setTwilioClient(null);
+  const prevKey = process.env.SMS8_API_KEY;
+  const prevFetch = global.fetch;
+  process.env.SMS8_API_KEY = 'test-key';
+  let captured = null;
+  global.fetch = async (url, opts) => {
+    captured = { url, body: String(opts.body) };
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ success: true, data: [{ ID: '445221', status: 'Pending' }] })
+    };
+  };
+  try {
+    const key = `test:sms8-delivery:${f.request.id}`;
+    await notify.sms(f.driver.id, f.driver.phone, 'SMS8 route check', {
+      requestId: f.request.id, eventType: 'test_dispatch_update', dedupeKey: key
+    });
+    const row = await db.one('SELECT * FROM notifications_log WHERE dedupe_key=$1', [key]);
+    assert.equal(row.status, 'sent');
+    assert.equal(row.simulated, false);
+    assert.equal(row.provider_message_id, 'sms8:445221');
+    assert.match(captured.url, /app\.sms8\.io\/api\/v1\/messages/);
+    const params = new URLSearchParams(captured.body);
+    assert.equal(params.get('key'), 'test-key');
+    const messages = JSON.parse(params.get('messages'));
+    assert.equal(messages[0].number, f.driver.phone);
+    assert.equal(messages[0].message, 'SMS8 route check');
+
+    // A failed SMS8 response goes back to the retry queue, not silently lost.
+    global.fetch = async () => ({ ok: false, status: 500, text: async () => 'gateway down' });
+    const failKey = `test:sms8-failure:${f.request.id}`;
+    const failed = await notify.sms(f.driver.id, f.driver.phone, 'SMS8 failure check', {
+      requestId: f.request.id, eventType: 'test_dispatch_update', dedupeKey: failKey
+    });
+    assert.equal(failed.status, 'pending');
+    const failRow = await db.one('SELECT * FROM notifications_log WHERE dedupe_key=$1', [failKey]);
+    assert.match(failRow.last_error, /SMS8 send failed/);
+  } finally {
+    global.fetch = prevFetch;
+    if (prevKey === undefined) delete process.env.SMS8_API_KEY;
+    else process.env.SMS8_API_KEY = prevKey;
+  }
 });
 
 test('protected account types cannot be rewritten as company members', () => {

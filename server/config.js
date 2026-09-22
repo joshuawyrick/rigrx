@@ -9,8 +9,17 @@ function simulationEnabled(env = process.env) {
   return !production && flag(env.RIGRX_ALLOW_SIMULATION);
 }
 
-function smsConfigured(env = process.env) {
+function twilioConfigured(env = process.env) {
   return ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER'].every(key => !!env[key]);
+}
+
+function sms8Configured(env = process.env) {
+  return !!env.SMS8_API_KEY;
+}
+
+// True when ANY real SMS provider is set up (Twilio or SMS8).
+function smsConfigured(env = process.env) {
+  return twilioConfigured(env) || sms8Configured(env);
 }
 
 function paymentsConfigured(env = process.env) {
@@ -30,9 +39,12 @@ function validateRuntimeConfig(env = process.env) {
   const paymentKeys = ['STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY'];
   const missingSms = smsKeys.filter(key => !env[key]);
   const missingPayments = paymentKeys.filter(key => !env[key]);
+  // Either provider satisfies the SMS requirement: full Twilio credentials, or an SMS8 key.
+  const smsReady = missingSms.length === 0 || sms8Configured(env);
 
   if (!simulation || production) {
-    missing.push(...missingSms, ...missingPayments);
+    if (!smsReady) missing.push(...missingSms, 'or SMS8_API_KEY');
+    missing.push(...missingPayments);
   }
 
   if (production && flag(env.RIGRX_ALLOW_SIMULATION)) {
@@ -48,13 +60,15 @@ function validateRuntimeConfig(env = process.env) {
     throw new Error('SESSION_SECRET must be at least 32 characters.');
   }
 
-  return { production, simulation, smsSimulated: missingSms.length > 0, paymentsSimulated: missingPayments.length > 0 };
+  return { production, simulation, smsSimulated: !smsReady, paymentsSimulated: missingPayments.length > 0 };
 }
 
 module.exports = {
   PRODUCTION,
   simulationEnabled,
   smsConfigured,
+  twilioConfigured,
+  sms8Configured,
   paymentsConfigured,
   validateRuntimeConfig
 };
